@@ -453,14 +453,14 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
-      tools: ["read", "bash"],
+      tools: ["read", "bash", "write"],
     },
     {
       name: "analyze",
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
-      tools: ["read", "bash"],
+      tools: ["read", "bash", "write"],
     },
     {
       name: "plan",
@@ -598,6 +598,35 @@ export const InventorySchema = z.object({
     returnType: z.string().optional(),
     sourceFile: z.string(),
     lineRange: z.tuple([z.number(), z.number()]),
+  })),
+
+  triggers: z.array(z.object({
+    name: z.string(),
+    timing: z.enum(["before", "after", "instead-of", "compound"]),
+    level: z.enum(["statement", "row"]),
+    targetTable: z.string(),
+    events: z.array(z.enum(["insert", "update", "delete"])),
+    sourceFile: z.string(),
+    lineRange: z.tuple([z.number(), z.number()]),
+    condition: z.string().optional(),              // WHEN 子句条件
+  })),
+
+  views: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().optional(),
+    sourceFile: z.string().optional(),
+    columns: z.array(z.string()),
+    underlyingTables: z.array(z.string()).optional(),  // 视图引用的基表
+  })),
+
+  sequences: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().optional(),
+    startWith: z.number().optional(),
+    incrementBy: z.number().optional(),
+    minValue: z.number().optional(),
+    maxValue: z.number().optional(),
+    cycle: z.boolean().optional(),
   })),
 })
 ```
@@ -991,8 +1020,8 @@ Runtime Context：
 
 | Phase | read | bash | write | edit | workflow |
 |-------|------|------|-------|------|----------|
-| inventory | ✓ | ✓ | | | ✓ |
-| analyze | ✓ | ✓ | | | ✓ |
+| inventory | ✓ | ✓ | ✓ | | ✓ |
+| analyze | ✓ | ✓ | ✓ | | ✓ |
 | plan | ✓ | ✓ | ✓ | ✓ | ✓ |
 | scaffold | ✓ | ✓ | ✓ | ✓ | ✓ |
 | translate | ✓ | ✓ | ✓ | ✓ | ✓ |
