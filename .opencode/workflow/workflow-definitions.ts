@@ -116,8 +116,15 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
 // --phases 前置依赖校验表
 // ============================================================================
 
-/** 目标阶段 → 必须存在的 artifact 文件名 */
-export const PHASE_PREREQUISITES: Record<string, string[]> = {
+/**
+ * 前置依赖项：
+ *   - string: 必须存在
+ *   - string[]: OR 组，至少一个存在即可
+ */
+export type PrerequisiteItem = string | string[]
+
+/** 目标阶段 → 必须存在的 artifact 文件名（string=必须，string[]=OR组） */
+export const PHASE_PREREQUISITES: Record<string, PrerequisiteItem[]> = {
   analyze: ["inventory-index.json", "inventory.json", "inventory-packages"],
   plan: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages"],
   scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages"],
@@ -126,9 +133,8 @@ export const PHASE_PREREQUISITES: Record<string, string[]> = {
   verify: ["plan.json", "scaffold.json"],
   fix: [
     "analysis.json", "analysis-packages", "plan.json", "scaffold.json",
-    // 触发阶段的 summary（review-summary.json 或 verify-summary.json，至少一个）
-    "review-summary.json", "verify-summary.json",
-    // 相关包的 per-package artifact
+    // 触发阶段的 summary：review-summary.json 或 verify-summary.json，至少一个
+    ["review-summary.json", "verify-summary.json"],
     "translations",
   ],
 }

@@ -18,6 +18,7 @@ import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-de
 import {
   getSchemaForPhase, getPerPackageSchema, getSummarySchema,
   getAnalysisPackageSchema, getInventoryPackageSchema,
+  getArtifactFilename,
 } from "../workflow/artifact-schemas"
 import { scanSource } from "../workflow/plsql-scanner"
 
@@ -78,7 +79,7 @@ function buildRuntimeContext(run: WorkflowRun): string {
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
   // 查找当前 entry（用于 incrementalContext 和 triggerPhase）
-  const currentEntry = findCurrentEntry(run)
+  const currentEntry = engine.findCurrentEntry(run)
 
   // triggerPhase：fix 阶段从 branchedFrom 获取触发阶段，注入到 context
   if (run.currentPhase === "fix" && currentEntry?.branchedFrom) {
@@ -111,20 +112,6 @@ function buildRuntimeContext(run: WorkflowRun): string {
   return lines.join("\n")
 }
 
-/** 找到当前 phase 的 in_progress/pending entry */
-function findCurrentEntry(run: WorkflowRun) {
-  for (let i = run.phaseHistory.length - 1; i >= 0; i--) {
-    const entry = run.phaseHistory[i]
-    if (
-      entry.phase === run.currentPhase &&
-      (entry.status === "in_progress" || entry.status === "pending")
-    ) {
-      return entry
-    }
-  }
-  return undefined
-}
-
 /**
  * 校验 inventory 拆分后的 inventory-packages/ 目录
  * - 从 inventory-index.json 获取期望包名
@@ -134,20 +121,12 @@ function findCurrentEntry(run: WorkflowRun) {
 function validateInventoryPackages(
   artifactsDir: string,
 ): string | null {
-  // 1. 检查 inventory-index.json 存在
-  const indexPath = join(artifactsDir, "inventory-index.json")
-  if (!existsSync(indexPath)) {
-    return "inventory-index.json not found. Pre-scan may have failed."
+  // 1. 检查 inventory-index.json 存在并获取期望包名
+  const indexArtifact = engine.loadArtifactJson(artifactsDir, "inventory-index")
+  if (!indexArtifact) {
+    return "inventory-index.json not found or malformed. Pre-scan may have failed."
   }
-
-  let expectedPackages: string[]
-  try {
-    const raw = readFileSync(indexPath, "utf-8")
-    const indexParsed = JSON.parse(raw)
-    expectedPackages = (indexParsed.packages as Array<{ name: string }>).map((p) => p.name)
-  } catch (e: any) {
-    return `Failed to read/parse inventory-index.json: ${e.message}`
-  }
+  const expectedPackages = Array.from(engine.extractPackageNames(indexArtifact))
 
   // 2. 检查 inventory-packages/ 目录
   const pkgDir = join(artifactsDir, "inventory-packages")
@@ -181,23 +160,17 @@ function validateInventoryPackages(
   }
 
   // 4. 校验 inventory.json 的 packageNames 与 index 一致
-  const inventoryPath = join(artifactsDir, "inventory.json")
-  if (!existsSync(inventoryPath)) {
-    return "inventory.json not found. Agent must write inventory.json before advancing."
+  const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+  if (!inventory) {
+    return "inventory.json not found or malformed. Agent must write inventory.json before advancing."
   }
-  try {
-    const raw = readFileSync(inventoryPath, "utf-8")
-    const parsed = JSON.parse(raw)
-    const invNames = new Set((parsed.packageNames as string[]) ?? [])
-    const idxNames = new Set(expectedPackages)
-    for (const n of idxNames) {
-      if (!invNames.has(n)) return `inventory.json packageNames missing: ${n}`
-    }
-    for (const n of invNames) {
-      if (!idxNames.has(n)) return `inventory.json packageNames has extra: ${n}`
-    }
-  } catch (e: any) {
-    return `Failed to read/parse inventory.json: ${e.message}`
+  const invNames = engine.extractPackageNames(inventory)
+  const idxNames = new Set(expectedPackages)
+  for (const n of idxNames) {
+    if (!invNames.has(n)) return `inventory.json packageNames missing: ${n}`
+  }
+  for (const n of invNames) {
+    if (!idxNames.has(n)) return `inventory.json packageNames has extra: ${n}`
   }
 
   return null // 校验通过
@@ -220,21 +193,11 @@ function validateAnalysisPackages(
   }
 
   // 从 inventory.json 获取期望包名
-  const inventoryPath = join(artifactsDir, "inventory.json")
-  if (!existsSync(inventoryPath)) {
-    return "inventory.json not found — cannot verify analysis package coverage"
+  const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+  if (!inventory) {
+    return "inventory.json not found or malformed — cannot verify analysis package coverage"
   }
-  let expectedPackages: string[]
-  try {
-    const invRaw = readFileSync(inventoryPath, "utf-8")
-    const invParsed = JSON.parse(invRaw)
-    // 新格式：packageNames（string[]）；旧格式兼容：packages[].name
-    expectedPackages = invParsed.packageNames
-      ? (invParsed.packageNames as string[])
-      : ((invParsed.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
-  } catch (e: any) {
-    return `Failed to read/parse inventory.json: ${e.message}`
-  }
+  const expectedPackages = Array.from(engine.extractPackageNames(inventory))
 
   // 逐包校验
   const pkgSchema = getAnalysisPackageSchema()
@@ -262,7 +225,7 @@ function validateAnalysisPackages(
   }
 
   // 校验 meta 文件 packageNames 与 inventory 一致
-  const metaNames = new Set((metaParsed.packageNames as string[]) ?? [])
+  const metaNames = engine.extractPackageNames(metaParsed)
   const invSet = new Set(expectedPackages)
   for (const n of invSet) {
     if (!metaNames.has(n)) return `analysis.json packageNames missing: ${n}`
@@ -287,9 +250,10 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
   // 1. 顶层 schema（inventory / analyze / plan / scaffold / fix）
   const topLevelSchema = getSchemaForPhase(phase)
   if (topLevelSchema) {
-    const filePath = join(artifactsDir, `${phase}.json`)
+    const artifactFileName = getArtifactFilename(phase)
+    const filePath = join(artifactsDir, `${artifactFileName}.json`)
     if (!existsSync(filePath)) {
-      return `Artifact not found on disk: ${filePath}. Agent must write ${phase}.json before advancing.`
+      return `Artifact not found on disk: ${filePath}. Agent must write ${artifactFileName}.json before advancing.`
     }
     try {
       const raw = readFileSync(filePath, "utf-8")
@@ -299,7 +263,7 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
         const errors = result.error.issues
           .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
           .join("\n")
-        return `Zod validation failed for ${phase}.json:\n${errors}`
+        return `Zod validation failed for ${artifactFileName}.json:\n${errors}`
       }
 
       // analyze 阶段：额外校验 analysis-packages/ 目录下的逐包文件
@@ -328,26 +292,53 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       return `Translations directory not found: ${translationsDir}. Agent must write per-package artifacts before advancing.`
     }
 
-    // 逐包 Zod 校验（translate / review / verify 阶段逐包持久化后必须有合法的 per-package 文件）
-    {
-      const pkgDirs = readdirSync(translationsDir, { withFileTypes: true })
-        .filter(d => d.isDirectory())
-      for (const pkgDir of pkgDirs) {
-        const artifactFile = join(translationsDir, pkgDir.name, `${phase}.json`)
-        if (!existsSync(artifactFile)) continue // 跳过无文件的包（增量模式）
-        try {
-          const raw = readFileSync(artifactFile, "utf-8")
-          const parsed = JSON.parse(raw)
-          const result = perPackageSchema.safeParse(parsed)
-          if (!result.success) {
-            const errors = result.error.issues
-              .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
-              .join("\n")
-            return `Zod validation failed for translations/${pkgDir.name}/${phase}.json:\n${errors}`
-          }
-        } catch (e: any) {
-          return `Failed to read/parse translations/${pkgDir.name}/${phase}.json: ${e.message}`
+    // 判断是否增量模式：查找当前 entry 的 incrementalContext
+    const currentEntry = engine.findCurrentEntry(run)
+    const isIncremental = !!currentEntry?.incrementalContext?.targetPackages?.length
+
+    // 非增量模式：校验所有期望包都有对应的 artifact 文件
+    if (!isIncremental) {
+      const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+      if (!inventory) {
+        return `inventory.json not found or malformed in ${artifactsDir}. Cannot verify per-package completeness for phase "${phase}".`
+      }
+      const expectedPackages = Array.from(engine.extractPackageNames(inventory))
+      for (const pkgName of expectedPackages) {
+        const artifactFile = join(translationsDir, pkgName, `${phase}.json`)
+        if (!existsSync(artifactFile)) {
+          return `Missing per-package artifact: translations/${pkgName}/${phase}.json. All packages must have artifacts before advancing.`
         }
+      }
+    } else {
+      // 增量模式：校验所有 targetPackages 都有对应的 artifact 文件
+      const targetPackages = currentEntry?.incrementalContext?.targetPackages ?? []
+      for (const pkgName of targetPackages) {
+        const artifactFile = join(translationsDir, pkgName, `${phase}.json`)
+        if (!existsSync(artifactFile)) {
+          return `Missing per-package artifact in incremental mode: translations/${pkgName}/${phase}.json. All targetPackages must have artifacts before advancing.`
+        }
+      }
+    }
+
+    // Zod 校验：对需要校验的包目录逐个验证 per-package artifact
+    const pkgDirsToValidate = isIncremental
+      ? (currentEntry?.incrementalContext?.targetPackages ?? []).map(name => ({ name, isDirectory: () => true }))
+      : readdirSync(translationsDir, { withFileTypes: true }).filter(d => d.isDirectory())
+    for (const pkgDir of pkgDirsToValidate) {
+      const artifactFile = join(translationsDir, pkgDir.name, `${phase}.json`)
+      if (!existsSync(artifactFile)) continue // 跳过无文件的包（增量模式下未修改的包）
+      try {
+        const raw = readFileSync(artifactFile, "utf-8")
+        const parsed = JSON.parse(raw)
+        const result = perPackageSchema.safeParse(parsed)
+        if (!result.success) {
+          const errors = result.error.issues
+            .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+            .join("\n")
+          return `Zod validation failed for translations/${pkgDir.name}/${phase}.json:\n${errors}`
+        }
+      } catch (e: any) {
+        return `Failed to read/parse translations/${pkgDir.name}/${phase}.json: ${e.message}`
       }
     }
 
@@ -381,6 +372,51 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
   return null
 }
 
+/**
+ * 校验 --phases 前置依赖（支持 OR-group）
+ * 返回缺失项列表，空数组表示全部通过
+ * .json 文件额外校验内容可解析（防止空文件或损坏 JSON 通过检查）
+ */
+function checkPrerequisites(targetPhases: string[], artifactsDir: string): string[] {
+  const missing: string[] = []
+  for (const phase of targetPhases) {
+    const prereqs = PHASE_PREREQUISITES[phase]
+    if (!prereqs) continue
+    for (const item of prereqs) {
+      if (Array.isArray(item)) {
+        // OR-group：至少一个存在且有效即可
+        const anyValid = item.some(f => {
+          const fullPath = join(artifactsDir, f)
+          if (!existsSync(fullPath)) return false
+          return validateJsonContent(fullPath, f)
+        })
+        if (!anyValid) {
+          missing.push(`${item.join(" 或 ")}（至少需要其中一个）`)
+        }
+      } else {
+        const fullPath = join(artifactsDir, item)
+        if (!existsSync(fullPath)) {
+          missing.push(item)
+        } else if (!validateJsonContent(fullPath, item)) {
+          missing.push(`${item}（文件存在但内容无效）`)
+        }
+      }
+    }
+  }
+  return missing
+}
+
+/** 校验 .json 文件内容可解析（非 .json 文件/目录直接返回 true） */
+function validateJsonContent(fullPath: string, name: string): boolean {
+  if (!name.endsWith(".json")) return true  // 目录类 prerequisite 不校验内容
+  try {
+    JSON.parse(readFileSync(fullPath, "utf-8"))
+    return true
+  } catch {
+    return false
+  }
+}
+
 // ── 插件导出 ──────────────────────────────────────────────────────────────────
 
 export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
@@ -391,6 +427,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
       args: {
         action: z.enum([
           "start", "advance", "confirm", "retry", "abort", "status", "list",
+          "prerequisites",
         ]),
         runId: z.string().optional(),
         sourcePath: z.string().optional(),
@@ -453,8 +490,11 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             const runId = args.runId
 
             // D5: 从磁盘校验 artifact（在 engine.advance 之前）
+            // fix-failed 时跳过校验：agent 可能无法写出有效 fix.json，advance(result="failed")
+            // 应直接进入 handleFixAdvance 的 failed 分支处理，不应被 Zod 校验拦截
             const statusBefore = engine.status(runId)
-            if (statusBefore && statusBefore.status === "running") {
+            const isFixFailed = statusBefore?.currentPhase === "fix" && args.result === "failed"
+            if (statusBefore && statusBefore.status === "running" && !isFixFailed) {
               const validationError = validateArtifactOnDisk(statusBefore)
               if (validationError) {
                 return {
@@ -472,8 +512,9 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
 
             if (adv.finished) {
               clearWorkflowContext()
+              const isWithIssues = adv.run.status === "completed_with_issues"
               return {
-                title: "Completed",
+                title: isWithIssues ? "Completed with Issues" : "Completed",
                 output: `${runId} done (status: ${adv.run.status})`,
                 metadata: { status: adv.run.status },
               }
@@ -488,10 +529,20 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             }
 
             if (adv.rejected) {
+              // 不清理 workflowContext：LLM 应修正 artifact 后重新 advance，当前 phase context 仍有效
               return {
                 title: "Rejected",
                 output: adv.rejectionReason!,
                 metadata: { rejected: true },
+              }
+            }
+
+            if (adv.fixFailed) {
+              // 不清理 workflowContext：LLM 应调用 retry()，retry 仍处于 fix phase，fix-phase context 仍有效
+              return {
+                title: "Fix Failed",
+                output: adv.rejectionReason!,
+                metadata: { fixFailed: true },
               }
             }
 
@@ -520,6 +571,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             if (!args.runId) throw new Error("runId required")
             const ret = engine.retry(args.runId)
             if (ret.exhausted) {
+              clearWorkflowContext()
               return {
                 title: "Exhausted",
                 output: `Retries exhausted: ${ret.retryCount}. Status: ${ret.run.status}`,
@@ -596,6 +648,35 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             }
           }
 
+          // ── prerequisites ──
+          case "prerequisites": {
+            // 校验指定阶段的前置 artifact 是否满足（支持 OR-group）
+            if (!args.phases) {
+              return { title: "Error", output: "phases parameter required", metadata: {} }
+            }
+            // 找到最近的 run 对应的 artifacts 目录
+            const runs = engine.listRuns()
+            const latestRun = runs[runs.length - 1]
+            if (!latestRun) {
+              return { title: "Error", output: "No workflow runs found", metadata: {} }
+            }
+            const artifactsDir = join(ARTIFACT_DIR, latestRun.runId)
+            const targetPhases = args.phases.split(",").map((p: string) => p.trim())
+            const missing = checkPrerequisites(targetPhases, artifactsDir)
+            if (missing.length > 0) {
+              return {
+                title: "Prerequisites Missing",
+                output: `Missing prerequisites for phases [${targetPhases.join(", ")}]:\n${missing.map(m => `  - ${m}`).join("\n")}`,
+                metadata: { missing, phases: targetPhases },
+              }
+            }
+            return {
+              title: "Prerequisites OK",
+              output: `All prerequisites satisfied for phases: ${targetPhases.join(", ")}`,
+              metadata: { phases: targetPhases },
+            }
+          }
+
           default:
             throw new Error(`Unknown action: ${args.action}`)
         }
@@ -641,11 +722,11 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
   "experimental.chat.system.transform": async (input: any) => {
     if (!currentWorkflowContext) return input
     try {
-      const fs = await import("fs")
-      const p = `${process.cwd()}/.opencode/${currentWorkflowContext.agentFile}`
-      if (fs.existsSync(p)) {
+      // 使用 __dirname（plugin/）的父目录（.opencode/）定位 agent 文件，不依赖 process.cwd()
+      const agentPath = join(__dirname, "..", currentWorkflowContext.agentFile)
+      if (existsSync(agentPath)) {
         // 1. 读取 agent .md 全文
-        let c = fs.readFileSync(p, "utf-8").replace(/^---[\s\S]*?---\n*/, "")
+        let c = readFileSync(agentPath, "utf-8").replace(/^---[\s\S]*?---\n*/, "")
 
         // 2. 提取通用部分 + 当前 phase section
         const common = extractCommonPart(c)
@@ -672,8 +753,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
           ...input,
           system: parts.join("\n\n"),
         }
+      } else {
+        console.error(`[workflow-engine] Agent file not found: ${agentPath}. System prompt will not be injected.`)
       }
-    } catch {}
+    } catch (e: any) {
+      console.error(`[workflow-engine] Failed to build system prompt: ${e.message}`)
+    }
     return input
   },
 })

@@ -84,7 +84,7 @@ LLM 传入 `result: "passed" | "failed"`（可选，见 D8 自动推导）。引
 - fix 完成后只重审 fix 修改过的包，不全量重做
 - fix 阶段产出 `FixArtifact { fixedPackages }`
 - fix 契约：必须修复全部 mustFix 项
-- **fix 失败处理**：修不完时 advance(result="failed") → 引擎标记当前 entry 为 failed，检查 isFixExhausted；未 exhausted 时返回 rejected=true + rejectionReason，LLM 应调用 retry 重试；exhausted 时 → completed_with_issues
+- **fix 失败处理**：修不完时 advance(result="failed") → 引擎标记当前 entry 为 failed，检查 isFixExhausted；未 exhausted 时返回 fixFailed=true + rejectionReason（区别于 Zod/D8/D12 的 rejected=true，fixFailed 明确告知 LLM 调用 retry() 重试）；exhausted 时 → completed_with_issues。注意：fix-failed 时插件跳过 artifact Zod 校验，因为 agent 可能无法写出有效的 fix.json
 - 引擎通过 `incrementalContext.targetPackages` 传递给 review/verify
 - 未修改包的 review.json / verify.json 保持不变
 - **已知限制**：增量 review 不检测 fix 对未修改包的间接影响（如修改被其他包依赖的 shared utility）；verify 阶段的全局编译作为兜底校验此类跨包回归
@@ -125,6 +125,7 @@ LLM 传入 `result: "passed" | "failed"`（可选，见 D8 自动推导）。引
 
 ### D9: 跨 Schema 校验时机
 
+- inventory 完成后：plugin 层 `validateInventoryPackages` 校验 inventory-index ↔ inventory.packageNames 一致（在 Zod 校验阶段完成，提前发现不一致）
 - analyze 完成后：校验 inventory ↔ analysis 包名一致
 - plan 完成后：校验 inventory ↔ analysis ↔ plan 映射完整
 - 校验失败记录 warning 到 `_events.log`，不阻塞流程
@@ -377,7 +378,8 @@ class WorkflowEngine {
     finished: boolean
     waitingForConfirmation: boolean            // D4: true 时不激活 agent
     rejected: boolean                          // 校验被拒绝时为 true（Zod/D8/D12），LLM 应修正后重新调用 advance
-    rejectionReason?: string                   // 拒绝原因，指导 LLM 修正
+    fixFailed: boolean                         // fix 失败但未 exhausted（D3），LLM 应调用 retry()，不与 rejected 同时为 true
+    rejectionReason?: string                   // 拒绝/失败原因，指导 LLM 修正或重试
   }
   confirm(runId: string): WorkflowRun          // D4: confirm 后 run.status paused → running，entry.status pending → in_progress
   retry(runId: string): {
@@ -414,7 +416,8 @@ advance(runId, { result, artifact? })
   ├─ 2. 当前 phase 的 artifact 磁盘 Zod 校验
   │     └─ 校验失败 → rejected=true, rejectionReason=Zod 错误详情，不标记 completed
   │
-  ├─ 3. 跨 Schema 校验（仅 analyze / plan 完成后触发）
+  ├─ 3. 跨 Schema 校验（D9）
+  │     ├─ inventory-index ↔ inventory 包名一致性由 plugin 层 validateInventoryPackages 在 Zod 校验阶段完成（Step 2）
   │     ├─ analyze 完成 → 校验 inventory ↔ analysis 包名一致 + translationOrder 覆盖
   │     └─ plan 完成 → 校验 inventory ↔ analysis ↔ plan 映射完整
   │     └─ 失败：记录 warning 到 _events.log，不阻塞流程
@@ -423,11 +426,11 @@ advance(runId, { result, artifact? })
   │     ├─ result === undefined → rejected=true, rejectionReason="fix 阶段 result 必填（D1/D3）"
   │     ├─ result === "failed"（fix 无法完成）→ 标记当前 entry 为 failed
   │     │   ├─ isFixExhausted(preCreate=false)? → completed_with_issues, finished=true
-  │     │   └─ 未 exhausted → rejected=true, rejectionReason 提示 LLM 调用 retry
+  │     │   └─ 未 exhausted → fixFailed=true, rejectionReason 提示 LLM 调用 retry
   │     ├─ result === "passed" → advanceFromFix（D3/D7）
   │     │   ├─ 从 branchedFrom 取触发阶段
   │     │   ├─ 从磁盘读取 fix.json，取 fixedPackages → 校验（D12）
-  │     │   │   ├─ 每个值必须存在于 inventory-index.packages[].name → 否则 rejected=true
+  │     │   │   ├─ 每个值必须存在于 inventory.packageNames（新格式优先，旧格式回退 inventory.packages[].name）→ 否则 rejected=true
   │     │   │   └─ fixedPackages 必须包含触发阶段 summary 中所有 passed=false 的包 → 否则 rejected=true
   │     │   │   └─ 拒绝时 rejectionReason 包含具体校验失败信息
   │     │   ├─ 校验通过 → 完成当前 phaseHistory entry（设 completedAt）
@@ -1058,29 +1061,20 @@ export const FixArtifactSchema = z.object({
 function validateCrossSchema(run: WorkflowRun, completedPhase: string): string[] {
   const warnings: string[] = []
   const inventory = loadArtifact(run, "inventory")
-  const inventoryIndex = loadArtifact(run, "inventory-index")
   const analysis  = loadArtifact(run, "analysis")
 
   // 防御性检查：artifact 不存在时只返回 warning，不崩溃
-  if (!inventory || !inventoryIndex || !analysis) {
-    warnings.push(`跨 Schema 校验跳过：缺少必要的 artifact（inventory: ${!!inventory}, inventory-index: ${!!inventoryIndex}, analysis: ${!!analysis}）`)
+  if (!inventory || !analysis) {
+    warnings.push(`跨 Schema 校验跳过：缺少必要的 artifact（inventory: ${!!inventory}, analysis: ${!!analysis}）`)
     return warnings
   }
 
-  // inventory-index ↔ inventory.packageNames（双向）
-  const indexNames = new Set(inventoryIndex.packages.map(p => p.name))
-  // 新格式优先：inventory.packageNames（string[]）；旧格式回退：inventory.packages[].name
+  // inventory-index ↔ inventory 包名一致性由 plugin 层 validateInventoryPackages 在 inventory 阶段 Zod 校验时完成，此处不重复
+
+  // inventory ↔ analysis 包名（双向）
   const invNames = inventory.packageNames
     ? new Set(inventory.packageNames)
     : new Set((inventory.packages ?? []).map(p => p.name))
-  for (const name of indexNames) {
-    if (!invNames.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
-  }
-  for (const name of invNames) {
-    if (!indexNames.has(name)) warnings.push(`inventory-index 缺少包: ${name}（inventory.packageNames 中存在）`)
-  }
-
-  // inventory ↔ analysis 包名（双向）
   // 新格式优先：analysis.packageNames；旧格式回退：analysis.packages[].name
   const anaNames = analysis.packageNames
     ? new Set(analysis.packageNames)

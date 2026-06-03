@@ -102,17 +102,21 @@ sql2java-workflow/
 |----|------|------|
 | D1 | advance condition | LLM 传入 result，引擎匹配 TransitionRule |
 | D2 | fix exhausted | 双层策略：globalMax=3（宽松），phaseMax=2（严格） |
-| D3 | fix 增量重做 | fix 后只重审修改过的包 |
+| D3 | fix 增量重做 | fix 后只重审修改过的包；fix 失败未 exhausted 返回 fixFailed=true（区别于 rejected），LLM 调 retry 重试 |
 | D4 | confirm 时序 | waitingForConfirmation=true 时不激活 agent |
-| D5 | artifact 写入 | agent 自己写 artifact，advance 时从磁盘做 Zod 校验 |
+| D5 | artifact 写入 | agent 自己写 artifact，advance 时从磁盘做 Zod 校验；fix-failed 时跳过 Zod 校验 |
 | D6 | 持久化 | run.json 全量单文件存储 |
 | D7 | fix 动态路由 | 从 branchedFrom 动态取目标阶段 |
 | D8 | result 自动推导 | review/verify 阶段引擎从 allPassed 自动推导 result |
-| D9 | 跨 Schema 校验 | analyze/plan 完成后校验包名/映射一致性（双格式兼容） |
+| D9 | 跨 Schema 校验 | inventory 阶段 plugin 层校验 index↔inventory 一致；analyze/plan 完成后校验包名/映射一致性（双格式兼容） |
 | D10 | SCC 处理 | 循环依赖组归为同层数组，各包保持独立 |
 | D11 | prompt 注入 | 只注入当前 Phase section + 通用规则 |
-| D12 | FixArtifact 校验 | 包名必须在 inventory 中存在，且覆盖所有失败包 |
+| D12 | FixArtifact 校验 | 包名必须在 inventory 中存在（packageNames 优先，旧格式回退 packages[].name），且覆盖所有失败包 |
 | D13 | FSD 生成 | analyze 阶段副产物，逐子程序 Markdown 文档 |
+| D14 | phase→filename 映射 | getArtifactFilename 处理 phase 名与磁盘文件名不一致（如 analyze→analysis.json） |
+| D15 | OR 前置语义 | PHASE_PREREQUISITES 支持 string[] 数组组（如 fix 的 summary 文件二选一） |
+| D16 | fix retry 清理 | retry 时清理残留 fix.json，重置 entry status + completedAt |
+| D17 | artifact 缓存 | 单次 advance 内缓存磁盘读取，advance 结束后清除 |
 
 ## 命令用法
 

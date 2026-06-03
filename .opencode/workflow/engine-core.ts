@@ -16,7 +16,7 @@
  *   D12: FixArtifact 包名校验
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -89,8 +89,9 @@ export interface AdvanceResult {
   nextPhase: PhaseConfig | null
   finished: boolean
   waitingForConfirmation: boolean               // D4: true 时不激活 agent
-  rejected: boolean                             // 校验被拒绝时为 true
-  rejectionReason?: string                      // 拒绝原因
+  rejected: boolean                             // 校验被拒绝时为 true（Zod/D8/D12），LLM 应修正后重新 advance
+  fixFailed?: boolean                           // fix 失败但未 exhausted，LLM 应调用 retry()（仅 fix 阶段设置）
+  rejectionReason?: string                      // 拒绝/失败原因
 }
 
 /** retry 返回结构 */
@@ -107,6 +108,13 @@ export class WorkflowEngine {
   private definitions = new Map<string, WorkflowDefinition>()
   private runs = new Map<string, WorkflowRun>()
   private artifactsRoot = ".workflow-artifacts"
+  /** 一次 advance 周期内的 artifact 缓存，advance 结束后清除 */
+  private artifactCache = new Map<string, Record<string, unknown> | null>()
+
+  /** 清除 artifact 缓存（每次 advance 开始时调用） */
+  clearArtifactCache(): void {
+    this.artifactCache.clear()
+  }
 
   // ── 注册 ──
 
@@ -145,6 +153,7 @@ export class WorkflowEngine {
   }
 
   advance(runId: string, input: { result?: "passed" | "failed" } = {}): AdvanceResult {
+    this.artifactCache.clear()  // 每次 advance 开始时清除缓存
     const run = this.getRun(runId)
     const def = this.getDefinition(run.definitionId)
     const now = new Date().toISOString()
@@ -174,9 +183,13 @@ export class WorkflowEngine {
     }
 
     // ── Step 2-3: 跨 Schema 校验 (D9) ──
-    const crossSchemaWarnings = this.validateCrossSchema(run, run.currentPhase!)
-    for (const w of crossSchemaWarnings) {
-      this.appendEvent(runId, "WARN", run.currentPhase ?? "", w)
+    // inventory-index ↔ inventory 包名一致性校验由 plugin 层 validateInventoryPackages 完成，此处不重复
+    // analyze/plan 完成后：校验 inventory ↔ analysis ↔ plan 包名一致性
+    if (run.currentPhase === "analyze" || run.currentPhase === "plan") {
+      const crossSchemaWarnings = this.validateCrossSchema(run, run.currentPhase!)
+      for (const w of crossSchemaWarnings) {
+        this.appendEvent(runId, "ADVANCE", run.currentPhase ?? "", `[cross-schema-warning] ${w}`)
+      }
     }
 
     // ── Step 4: fix 阶段特殊处理 ──
@@ -230,11 +243,12 @@ export class WorkflowEngine {
 
     // ── Step 9: to === DONE_SENTINEL → 完成 ──
     if (matchedRule.to === DONE_SENTINEL) {
+      const completedPhase = run.currentPhase! // 保存 phase 名用于日志（下面设为 null）
       run.status = "completed"
       run.currentPhase = null
       run.updatedAt = now
       this.persist(run)
-      this.appendEvent(runId, "COMPLETE", run.currentPhase ?? "", "workflow completed")
+      this.appendEvent(runId, "COMPLETE", completedPhase, "workflow completed")
       return {
         run,
         nextPhase: null,
@@ -332,13 +346,22 @@ export class WorkflowEngine {
     const run = this.getRun(runId)
     const def = this.getDefinition(run.definitionId)
     const currentEntry = this.findCurrentEntry(run)
-    if (!currentEntry) throw new Error("No current in_progress phase to retry")
+    if (!currentEntry) throw new Error("No current active phase entry to retry (expected in_progress, pending, or failed)")
 
     const phaseConfig = def.phases.find(p => p.name === run.currentPhase)
 
     // 重置 entry status 为 in_progress（设计要求）
     currentEntry.status = "in_progress"
+    currentEntry.completedAt = undefined    // 清除之前 fix-failed 设置的 completedAt
     currentEntry.retryCount++
+
+    // fix 阶段 retry 时清理残留的 fix.json，避免 agent retry 后读到上次的畸形文件
+    if (phaseConfig?.isFixPhase) {
+      const fixFilePath = join(this.artifactsRoot, run.runId, "fix.json")
+      if (existsSync(fixFilePath)) {
+        try { unlinkSync(fixFilePath) } catch { /* 删除失败不阻塞 retry */ }
+      }
+    }
     const maxRetries = phaseConfig?.maxRetries ?? 2
 
     if (currentEntry.retryCount >= maxRetries) {
@@ -419,6 +442,37 @@ export class WorkflowEngine {
     return run
   }
 
+  // ── inventory-index ↔ inventory 包名一致性校验 ──
+  // inventory 完成后独立触发，不依赖 analysis artifact
+  validateInventoryIndexConsistency(run: WorkflowRun): string[] {
+    const warnings: string[] = []
+    const artifactsDir = join(this.artifactsRoot, run.runId)
+
+    const inventoryIndex = this.loadArtifactJson(artifactsDir, "inventory-index")
+    const inventory = this.loadArtifactJson(artifactsDir, "inventory")
+
+    if (!inventory) {
+      warnings.push("inventory-index ↔ inventory 校验跳过：inventory.json 不存在或无法解析")
+      return warnings
+    }
+    if (!inventoryIndex) {
+      warnings.push("inventory-index ↔ inventory 校验跳过：inventory-index.json 不存在（预扫描可能失败）")
+      return warnings
+    }
+
+    const indexNames = new Set(
+      ((inventoryIndex.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
+    )
+    const invNames = this.extractPackageNames(inventory)
+    for (const name of indexNames) {
+      if (!invNames.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
+    }
+    for (const name of invNames) {
+      if (!indexNames.has(name)) warnings.push(`inventory-index 缺少包: ${name}（inventory.packageNames 中存在）`)
+    }
+    return warnings
+  }
+
   // ── 跨 Schema 校验 (D9) ──
   // 返回 warnings 数组（不阻塞流程）
 
@@ -426,7 +480,6 @@ export class WorkflowEngine {
     const warnings: string[] = []
     const artifactsDir = join(this.artifactsRoot, run.runId)
 
-    const inventoryIndex = this.loadArtifactJson(artifactsDir, "inventory-index")
     const inventory = this.loadArtifactJson(artifactsDir, "inventory")
     const analysis = this.loadArtifactJson(artifactsDir, "analysis")
 
@@ -437,21 +490,7 @@ export class WorkflowEngine {
       return warnings
     }
 
-    // inventory-index ↔ inventory.packageNames（双向）
-    if (!inventoryIndex) {
-      warnings.push("跨 Schema 校验跳过 inventory-index 检查：inventory-index.json 不存在（预扫描可能失败）")
-    } else {
-      const indexNames = new Set(
-        ((inventoryIndex.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
-      )
-      const invNames = this.extractPackageNames(inventory)
-      for (const name of indexNames) {
-        if (!invNames.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
-      }
-      for (const name of invNames) {
-        if (!indexNames.has(name)) warnings.push(`inventory-index 缺少包: ${name}（inventory.packageNames 中存在）`)
-      }
-    }
+    // inventory-index ↔ inventory 一致性已在 inventory 阶段完成时独立校验，此处不重复
 
     // inventory 包名 ↔ analysis 包名（双向）
     const invNames = this.extractPackageNames(inventory)
@@ -522,11 +561,11 @@ export class WorkflowEngine {
     return def
   }
 
-  private findCurrentEntry(run: WorkflowRun): PhaseHistoryEntry | undefined {
-    // 找最后一个当前 phase 的 entry
+  findCurrentEntry(run: WorkflowRun): PhaseHistoryEntry | undefined {
+    // 找最后一个当前 phase 的 entry（含 failed，用于 fix failed 后 retry 能找到）
     for (let i = run.phaseHistory.length - 1; i >= 0; i--) {
       const entry = run.phaseHistory[i]
-      if (entry.phase === run.currentPhase && (entry.status === "in_progress" || entry.status === "pending")) {
+      if (entry.phase === run.currentPhase && (entry.status === "in_progress" || entry.status === "pending" || entry.status === "failed")) {
         return entry
       }
     }
@@ -534,7 +573,7 @@ export class WorkflowEngine {
   }
 
   /** 从 artifact JSON 提取包名集合（兼容 new/old 格式） */
-  private extractPackageNames(
+  extractPackageNames(
     artifact: Record<string, unknown>,
     toUpperCase = false,
   ): Set<string> {
@@ -637,18 +676,18 @@ export class WorkflowEngine {
       }
     }
 
-    // fix failed：修不完
+    // fix failed：修不完 — D3 要求标记 entry 为 failed
     if (input.result === "failed") {
+      currentEntry.status = "failed"
+      currentEntry.completedAt = now
       run.updatedAt = now
 
       if (this.isFixExhausted(run, currentEntry.branchedFrom ?? "", false)) {
-        // exhausted → 终态：标记 entry 为 failed，run 为 completed_with_issues
-        currentEntry.status = "failed"
-        currentEntry.completedAt = now
+        // exhausted → 终态：run 为 completed_with_issues
         run.status = "completed_with_issues"
         run.currentPhase = null
         this.persist(run)
-        this.appendEvent(run.runId, "COMPLETE", "", "completed_with_issues (fix failed + exhausted)")
+        this.appendEvent(run.runId, "COMPLETE", "fix", "completed_with_issues (fix failed + exhausted)")
         return {
           run,
           nextPhase: null,
@@ -658,14 +697,16 @@ export class WorkflowEngine {
         }
       }
 
-      // 未 exhausted → rejected，保持 entry 为 in_progress 让 retry 能找到它
+      // 未 exhausted → fixFailed，LLM 应调用 retry()（retry 会将 entry 从 failed 重置为 in_progress）
       this.persist(run)
+      this.appendEvent(run.runId, "FAIL", "fix", "fix failed but not exhausted, awaiting retry")
       return {
         run,
         nextPhase: null,
         finished: false,
         waitingForConfirmation: false,
-        rejected: true,
+        rejected: false,
+        fixFailed: true,
         rejectionReason: "fix failed but not exhausted. Please call retry() to try again.",
       }
     }
@@ -709,7 +750,7 @@ export class WorkflowEngine {
       }
     }
 
-    // D12: 校验包名存在于 inventory
+    // D12: 校验包名存在于 inventory（新格式 packageNames 优先，旧格式 packages[].name 回退）
     const inventory = this.loadArtifactJson(artifactsDir, "inventory")
     if (inventory) {
       const invPackageNames = this.extractPackageNames(inventory, true)
@@ -796,8 +837,12 @@ export class WorkflowEngine {
     }
   }
 
-  /** 从磁盘加载 artifact JSON（防御性，不存在返回 null） */
-  private loadArtifactJson(artifactsDir: string, name: string): Record<string, unknown> | null {
+  /** 从磁盘加载 artifact JSON（防御性，不存在返回 null；单次 advance 内缓存；plugin 层也可调用） */
+  loadArtifactJson(artifactsDir: string, name: string): Record<string, unknown> | null {
+    const cacheKey = `${artifactsDir}/${name}`
+    if (this.artifactCache.has(cacheKey)) {
+      return this.artifactCache.get(cacheKey)!
+    }
     // 尝试多个路径
     const candidates = [
       join(artifactsDir, `${name}.json`),
@@ -806,12 +851,16 @@ export class WorkflowEngine {
     for (const filePath of candidates) {
       if (existsSync(filePath)) {
         try {
-          return JSON.parse(readFileSync(filePath, "utf-8"))
+          const result = JSON.parse(readFileSync(filePath, "utf-8"))
+          this.artifactCache.set(cacheKey, result)
+          return result
         } catch {
+          this.artifactCache.set(cacheKey, null)
           return null
         }
       }
     }
+    this.artifactCache.set(cacheKey, null)
     return null
   }
 

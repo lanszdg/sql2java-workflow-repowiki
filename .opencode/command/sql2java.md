@@ -128,6 +128,8 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
    find .workflow-artifacts -name "*.json" -type f | sort
    ```
 
+   **OR 语义**：标注为 "A 或 B" 的前置项只需至少一个存在即可（如 fix 阶段的 `review-summary.json 或 verify-summary.json`）。
+
    缺少前置 → 报错退出，列出缺失文件。
 
 3. **启动工作流**：
@@ -184,10 +186,10 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 | 阶段 | 前置产物 |
 |------|---------|
 | inventory | 无 |
-| analyze | inventory.json |
-| plan | inventory.json + analysis.json + analysis-packages/ |
-| scaffold | plan.json + inventory.json |
-| translate | inventory.json + analysis.json + analysis-packages/ + plan.json + scaffold.json |
+| analyze | inventory-index.json + inventory.json + inventory-packages/ |
+| plan | inventory-index.json + inventory.json + inventory-packages/ + analysis.json + analysis-packages/ |
+| scaffold | plan.json + inventory-index.json + inventory.json + inventory-packages/ |
+| translate | inventory-index.json + inventory.json + inventory-packages/ + analysis.json + analysis-packages/ + plan.json + scaffold.json |
 | review | plan.json + scaffold.json + analysis.json + analysis-packages/ |
 | verify | plan.json + scaffold.json |
-| fix | analysis.json + analysis-packages/ + plan.json + scaffold.json |
+| fix | analysis.json + analysis-packages/ + plan.json + scaffold.json + review-summary.json 或 verify-summary.json + translations/ |

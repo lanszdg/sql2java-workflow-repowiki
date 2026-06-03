@@ -467,6 +467,21 @@ export const FixArtifactSchema = z.object({
 
 import type { ZodTypeAny } from "zod"
 
+/** 阶段名 → 磁盘文件名映射（phase 名与文件名不一致时使用） */
+const PHASE_FILENAME_MAP: Record<string, string> = {
+  inventory: "inventory",
+  "inventory-index": "inventory-index",
+  analyze: "analysis",       // phase="analyze" → 文件名 analysis.json
+  plan: "plan",
+  scaffold: "scaffold",
+  fix: "fix",
+}
+
+/** 根据阶段名获取磁盘文件名（不含 .json 后缀） */
+export function getArtifactFilename(phase: string): string {
+  return PHASE_FILENAME_MAP[phase] ?? phase
+}
+
 /** 根据阶段名查找对应的 Zod Schema */
 export function getSchemaForPhase(phase: string): ZodTypeAny | null {
   const schemaMap: Record<string, ZodTypeAny> = {
