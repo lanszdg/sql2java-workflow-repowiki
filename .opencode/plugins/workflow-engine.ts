@@ -35,6 +35,38 @@ let currentWorkflowContext: {
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
+/** 格式化阶段开始 banner */
+function formatPhaseStartBanner(phaseName: string): string {
+  const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(p => p.name === phaseName)
+  const desc = phaseConfig?.description ?? phaseName
+  const isFix = phaseConfig?.isFixPhase ?? false
+  // fix 是条件分支阶段，不属于主线 1-N 进度
+  const mainPhases = SQL2JAVA_WORKFLOW.phases.filter(p => !p.isFixPhase)
+  const idx = mainPhases.findIndex(p => p.name === phaseName) + 1
+  const total = mainPhases.length
+  const label = isFix
+    ? `${phaseName} — ${desc}`
+    : `阶段 ${idx}/${total}：${phaseName} — ${desc}`
+  return [
+    ``,
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    `▶ ${label}`,
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    ``,
+  ].join("\n")
+}
+
+/** 格式化阶段完成 banner */
+function formatPhaseEndBanner(phaseName: string, duration?: string): string {
+  return [
+    ``,
+    `────────────────────────────────────────────────`,
+    `✔ ${phaseName} 完成${duration ? ` (${duration})` : ""}`,
+    `────────────────────────────────────────────────`,
+    ``,
+  ].join("\n")
+}
+
 function setWorkflowContext(run: WorkflowRun): void {
   const phaseConfig = SQL2JAVA_WORKFLOW.phases.find((p) => p.name === run.currentPhase)
   currentWorkflowContext = {
@@ -477,9 +509,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
 
             const run = engine.start("sql2java", runId, metadata)
             setWorkflowContext(run)
+            const banner = formatPhaseStartBanner(run.currentPhase!)
             return {
               title: "Started",
-              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}`,
+              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}${banner}`,
               metadata: { runId, phase: run.currentPhase, scanStatus },
             }
           }
@@ -513,17 +546,26 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             if (adv.finished) {
               clearWorkflowContext()
               const isWithIssues = adv.run.status === "completed_with_issues"
+              const prevPhase = statusBefore?.currentPhase ?? ""
+              const endBanner = formatPhaseEndBanner(prevPhase)
+              const finalMsg = isWithIssues
+                ? "⚠️ 工作流完成，但存在未解决问题"
+                : "🎉 工作流全部完成！"
               return {
                 title: isWithIssues ? "Completed with Issues" : "Completed",
-                output: `${runId} done (status: ${adv.run.status})`,
+                output: `${endBanner}${finalMsg}\nrunId: ${runId} | status: ${adv.run.status}`,
                 metadata: { status: adv.run.status },
               }
             }
 
             if (adv.waitingForConfirmation) {
+              const prevPhase = statusBefore?.currentPhase ?? ""
+              const endBanner = formatPhaseEndBanner(prevPhase)
+              const pausedPhase = adv.run.currentPhase ?? ""
+              const pausedDesc = adv.nextPhase?.description ?? pausedPhase
               return {
                 title: "Paused",
-                output: `Confirm required for ${adv.run.currentPhase}. Call workflow({action:"confirm",runId:"${runId}"})`,
+                output: `${endBanner}⏸ ${pausedPhase}（${pausedDesc}）等待确认。请审阅后调用：\nworkflow({action:"confirm",runId:"${runId}"})`,
                 metadata: { waitingForConfirmation: true },
               }
             }
@@ -547,9 +589,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             }
 
             setWorkflowContext(adv.run)
+            const prevPhase = statusBefore?.currentPhase ?? ""
+            const endBanner = formatPhaseEndBanner(prevPhase)
+            const startBanner = formatPhaseStartBanner(adv.run.currentPhase!)
             return {
               title: `→ ${adv.run.currentPhase}`,
-              output: `Phase: ${adv.run.currentPhase}\nAgent: ${adv.nextPhase?.agentFile}`,
+              output: `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}`,
               metadata: { runId, phase: adv.run.currentPhase },
             }
           }
@@ -559,9 +604,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
             if (!args.runId) throw new Error("runId required")
             const r = engine.confirm(args.runId)
             setWorkflowContext(r)
+            const startBanner = formatPhaseStartBanner(r.currentPhase!)
+            const confirmedPhase = r.currentPhase ?? ""
+            const confirmedDesc = SQL2JAVA_WORKFLOW.phases.find(p => p.name === confirmedPhase)?.description ?? confirmedPhase
             return {
               title: "Confirmed",
-              output: `${r.currentPhase} | ${r.status}`,
+              output: `${startBanner}✔ ${confirmedPhase}（${confirmedDesc}）已确认，继续执行: ${r.status}`,
               metadata: { runId: args.runId },
             }
           }

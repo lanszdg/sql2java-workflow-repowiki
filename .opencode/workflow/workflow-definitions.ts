@@ -16,6 +16,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
   phases: [
     {
       name: "inventory",
+      description: "源码扫描编目",
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
@@ -23,6 +24,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "analyze",
+      description: "依赖分析 + 子程序结构解析 + FSD 生成",
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
@@ -30,6 +32,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "plan",
+      description: "Java 架构规划（需人工确认）",
       agentFile: "agent/java-architect.md",
       temperature: 0.2,
       maxRetries: 1,
@@ -38,6 +41,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "scaffold",
+      description: "Spring Boot 项目骨架生成",
       agentFile: "agent/java-architect.md",
       temperature: 0.2,
       maxRetries: 1,
@@ -45,6 +49,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "translate",
+      description: "PL/SQL → Java/MyBatis 逐包翻译",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
@@ -52,6 +57,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "review",
+      description: "翻译质量审查",
       agentFile: "agent/reviewer.md",
       temperature: 0.1,
       maxRetries: 1,
@@ -59,6 +65,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "verify",
+      description: "编译验证 + MyBatis 校验 + 测试骨架",
       agentFile: "agent/reviewer.md",
       temperature: 0.1,
       maxRetries: 2,
@@ -66,6 +73,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "fix",
+      description: "修复审查/验证发现的问题",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,

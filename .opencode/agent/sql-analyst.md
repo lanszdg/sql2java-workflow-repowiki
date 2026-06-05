@@ -43,6 +43,18 @@ permission:
 - 写入前确保 JSON 格式合法（无尾逗号、引号闭合）
 - 写入后不需要读回验证（引擎 advance 时会做 Zod 校验）
 
+### 阶段小结
+
+在调用 `workflow({ action: "advance" })` **之前**，必须输出本阶段工作小结，格式如下：
+
+```
+📋 {phaseName} 阶段小结
+├─ 产出物：{列出写入的关键文件及数量}
+├─ 处理范围：{包数量、子程序数量等}
+├─ 关键指标：{如：调用图节点数、拓扑排序层数、FSD 完整率等}
+└─ 耗时/异常：{如有异常或特别耗时的操作，简要说明}
+```
+
 ### 阶段完成
 
 工作完成后，调用 `workflow` 工具推进到下一阶段：
@@ -297,7 +309,15 @@ workflow({ action: "advance", runId: "${runId}", result: "passed" })
    mkdir -p ${artifactsDir}/analysis-packages
    mkdir -p ${artifactsDir}/fsd
    ```
-4. 确定批次计划：将包按 2-3 个一组分批（无子程序的包合并到相邻批次）
+4. 确定批次计划：将包按 2-3 个一组分批
+   - **无子程序的包**：不加入批次、不创建 fsd 子目录、不生成 FSD
+   - 但仍需写入 `analysis-packages/{PKG}.json`（`subprograms: []`），**在开始分批前先处理这些包**：
+     ```bash
+     # 为所有无子程序的包写入空的 analysis-packages 文件
+     for pkg in <无子程序的包名列表>; do
+       echo '{"packageName":"'$pkg'","subprograms":[]}' > ${artifactsDir}/analysis-packages/${pkg}.json
+     done
+     ```
 
 #### Step 1：构建全局依赖图 + 拓扑排序
 
@@ -373,28 +393,81 @@ grep -rn '\w\+_\w\+\.\w\+' ${sourcePath}/pkg/ --include="*.sql" | grep -v "^.*--
 对当前批次的每个子程序生成 FSD（Functional Specification Document），6 板块结构：
 
 1. **概览**：子程序名、签名、功能摘要、参数清单 + Java 类型映射、转换策略
-2. **表结构映射**：涉及的表 + 操作类型、特殊列处理（不逐列重复 inventory 已有数据）
+2. **表结构映射**：涉及的表 + 操作类型（SELECT/INSERT/UPDATE/DELETE）、关联条件、特殊列的处理说明。概述表用途即可，不需逐列列出全部字段定义
 3. **依赖分析**：调用的其他子程序及 Java 方法、跨包调用 → Service 注入关系
 4. **业务规则**：校验规则、计算逻辑、状态流转、边界条件
 5. **控制流与异常**：分支逻辑、循环结构、异常处理路径（复杂子程序建议 Mermaid 流程图）
 6. **特殊语法转化规约**：Oracle 专有构造 → Java/MyBatis 等价写法、事务边界、TODO 清单
 
-每完成一个子程序的 FSD，用 `write` 工具写入 `${artifactsDir}/fsd/{package}/{subprogram}.md`。包名使用 inventory 中的 Oracle 包名，子程序名使用小写 snake_case。
+⛔ **FSD 自包含规则（禁止"详见"占位符）**：
+
+每个 FSD 文件必须是一份**完整、自包含**的文档，任何人读这个 md 文件就能理解该子程序的全部设计，无需打开其他文件。
+
+- ✅ **必须**：每个板块写出实际内容（表名、字段名、逻辑描述、转化方案等）
+- ❌ **禁止**：使用"详见 xxx.json"、"详见 analysis-packages/xxx"等指向其他文件的占位文本
+- ❌ **禁止**：任何板块只写一句"详见..."而没有实质内容
+
+**正确示例**：
+```markdown
+## 2. 表结构映射
+| 表名 | 操作 | 关键条件 |
+|------|------|---------|
+| T_PURCHASE_ORDER | INSERT | po_id = seq_po.NEXTVAL |
+| T_SUPPLIER | SELECT | supplier_id = p_supplier_id, status='ACTIVE' |
+特殊处理：po_no 由 gen_doc_no 生成，不由调用方传入。
+```
+
+**错误示例（禁止）**：
+```markdown
+## 2. 表结构映射
+详见 analysis-packages/PROCUREMENT_PKG.json 中的 sqlOperations 字段。
+```
+
+**文件名规则**：
+
+- 路径：`${artifactsDir}/fsd/{package}/{subprogram}.md`
+- 包名使用 inventory 中的 Oracle 包名（如 `PROCUREMENT_PKG`）
+- 子程序名使用小写 snake_case（如 `create_po`）
+- **重载子程序**（同名不同参数）：按在 inventory-packages/{PKG}.json 中出现的顺序，第一个用 `{name}.md`，后续用 `{name}__{序号}.md`（如 `get_param.md`、`get_param__2.md`、`get_param__3.md`）
+
+每完成一个子程序的 FSD，**立即**用 `write` 工具写入。禁止攒多个子程序再批量写入。
 
 **3e. 批次完成后继续下一批**
 
 当前批次所有包都处理完毕后，进入下一个批次，重复 3a-3d。
 
-#### Step 4：全部完成后调用 advance
+#### Step 4：全部完成后验证并调用 advance
 
-所有包处理完毕后，验证完整性：
+所有包处理完毕后，必须执行**严格验证**，缺少任何文件都不能 advance：
 
 ```bash
-echo "Per-package files:" && ls ${artifactsDir}/analysis-packages/*.json | wc -l
-echo "FSD files:" && find ${artifactsDir}/fsd -name "*.md" | wc -l
+# 1. analysis-packages 文件数（应覆盖所有包，含无子程序的包）
+echo "=== analysis-packages ===" && ls ${artifactsDir}/analysis-packages/*.json | wc -l
+
+# 2. FSD 文件数 vs inventory 子程序总数（需逐包对比）
+for f in ${artifactsDir}/inventory-packages/*.json; do
+  pkg=$(basename "$f" .json)
+  inv_count=$(python3 -c "import json; d=json.load(open('$f')); print(len(d.get('procedures',[])))")
+  fsd_count=$(find ${artifactsDir}/fsd/$pkg -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$inv_count" != "$fsd_count" ]; then
+    echo "❌ MISSING: $pkg inventory=$inv_count fsd=$fsd_count"
+  else
+    echo "✅ $pkg: $fsd_count FSD files"
+  fi
+done
+
+# 3. 检查是否有 FSD 包含"详见"占位符（应该为 0）
+echo "=== Stub check ===" && grep -rl "详见" ${artifactsDir}/fsd/ --include="*.md" | wc -l
 ```
 
-确认文件数与 inventory 包数一致后，调用：
+**验证通过条件**：
+- ✅ 每个包（含无子程序的包）都有对应的 `analysis-packages/{PKG}.json`
+- ✅ 每个子程序都有对应的 FSD 文件（inventory procedures 数量 = FSD 文件数量）
+- ✅ 没有 FSD 文件包含"详见"占位符（stub check = 0）
+
+**如果验证失败**：补齐缺失的 FSD 文件，重新运行验证。**禁止在文件缺失时调用 advance。**
+
+验证全部通过后，调用：
 ```
 workflow({ action: "advance", runId: "${runId}", result: "passed" })
 ```
@@ -409,8 +482,15 @@ workflow({ action: "advance", runId: "${runId}", result: "passed" })
   ```bash
   ls ${artifactsDir}/analysis-packages/*.json 2>/dev/null | xargs -I{} basename {} .json
   ```
-- 与 inventory 包名对比，跳过已有 per-package 文件的包
-- 检查已存在的 `fsd/` 目录，跳过已生成的 FSD 文件
+- 与 inventory 包名对比，跳过已有 per-package 文件的包（**但无子程序的包也必须有 analysis-packages 文件**）
+- 检查已存在的 `fsd/` 目录：
+  - 跳过已生成且**内容完整**（无"详见"占位符）的 FSD 文件
+  - 含"详见"占位符的 FSD 文件必须重新生成
+  - 缺失的 FSD 文件必须补齐
+- 用 bash 检测"详见"占位符文件：
+  ```bash
+  grep -rl "详见" ${artifactsDir}/fsd/ --include="*.md"
+  ```
 - 从第一个未完成的包继续分批处理
 
 ### 质量检查
@@ -420,6 +500,10 @@ workflow({ action: "advance", runId: "${runId}", result: "passed" })
 - [ ] SCC 组在 translationOrder 中为同层数组
 - [ ] 每个子程序都有 blocks 解析（至少一个语句块）
 - [ ] 每个 FSD 文件都包含 6 个板块
+- [ ] **FSD 文件自包含**：无"详见..."占位符，每个板块有实质内容
+- [ ] **FSD 文件完整**：inventory 中每个子程序都有对应的 FSD 文件
+- [ ] **无空目录**：没有子程序的包不创建 fsd 子目录
+- [ ] **重载子程序**：同名子程序使用 `{name}__{序号}.md` 区分
 - [ ] FSD 的 {package} 使用 inventory 中的 Oracle 包名
 - [ ] 风险等级只使用 low/medium/high 三种值
 - [ ] analysis.json 的 packageNames 覆盖 inventory 中所有包

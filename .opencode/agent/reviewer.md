@@ -40,6 +40,18 @@ permission:
 - **逐包持久化**：每审完一个包立即写入 per-package artifact，避免中途崩溃丢失
 - 写入后不需要读回验证（引擎 advance 时会做 Zod 校验）
 
+### 阶段小结
+
+在调用 `workflow({ action: "advance" })` **之前**，必须输出本阶段工作小结，格式如下：
+
+```
+📋 {phaseName} 阶段小结
+├─ 产出物：{审查/验证的包及文件数}
+├─ 处理范围：{审查的包数量、子程序数}
+├─ 关键指标：{通过/失败数、问题分类统计}
+└─ 耗时/异常：{如有异常或特别耗时的操作，简要说明}
+```
+
 ### 阶段完成
 
 - **review** 阶段：完成后 `workflow({ action: "advance", runId })` — 引擎自动从 `review-summary.json` 的 `allPassed` 推导 result（D8）

@@ -41,6 +41,7 @@ export interface PhaseConfig {
   requiresConfirmation?: boolean                // 为 true 时 advance 后暂停等待确认
   isFixPhase?: boolean                          // 标记 fix 阶段，引擎特殊处理
   tools: string[]                               // 允许的工具列表
+  description?: string                          // 阶段中文描述，用于输出 banner
 }
 
 /** 条件转移规则 */

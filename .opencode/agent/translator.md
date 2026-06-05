@@ -41,6 +41,18 @@ permission:
 - per-package artifact 逐包写入，支持崩溃恢复
 - 写入后不需要读回验证（引擎 advance 时会做 Zod 校验）
 
+### 阶段小结
+
+在调用 `workflow({ action: "advance" })` **之前**，必须输出本阶段工作小结，格式如下：
+
+```
+📋 {phaseName} 阶段小结
+├─ 产出物：{列出翻译/修复的包及文件数}
+├─ 处理范围：{翻译的子程序数、修复的问题数}
+├─ 关键指标：{成功率、跳过数、TODO 数等}
+└─ 耗时/异常：{如有异常或特别耗时的操作，简要说明}
+```
+
 ### 阶段完成
 
 - **translate** 阶段：`condition: "always"`，完成后 `workflow({ action: "advance", runId, result: "passed" })`
@@ -112,6 +124,7 @@ permission:
   - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（逐包读取）
   - `${artifactsDir}/scaffold.json` — 已生成的项目骨架
   - `${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
+    - **重载子程序**的 FSD 文件名格式为 `{name}__{序号}.md`（如 `get_param.md`、`get_param__2.md`），对应同一子程序名但不同参数签名的多个版本
 - **源码文件**：原始 PL/SQL 文件
 
 ### 输出
@@ -136,7 +149,7 @@ permission:
 3. **逐子程序翻译**：对该包的每个子程序：
    - 参考子程序的 blocks、variables、cursors、exceptionHandlers
    - 参考翻译注意事项 translationNotes
-   - 可选参考 FSD 文档
+   - 可选参考 FSD 文档（注意：`__{序号}.md` 后缀的是重载子程序，对应同一子程序的不同参数版本）
    - 按五原则翻译为 Java 代码
 3. **生成文件**：
    - Mapper 接口（`@Mapper`，包含所有子程序对应的 SQL 方法）
