@@ -11,6 +11,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, extname, relative } from "node:path"
 import { ensureDeps, findOpencodeDir } from "./ensure-deps"
+import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 
 // ── 类型 ────────────────────────────────────────────────────────────────────────
 
@@ -709,13 +710,20 @@ function regexExtractProceduresFromBody(lines: string[], pkg: PackageIndex): voi
     // 追踪 BEGIN/END 深度来定位结束行
     // 注意：END IF / END LOOP / END CASE 不是块结束，需要排除
     if (currentProc) {
-      const begins = (line.match(/\bBEGIN\b/gi) || []).length
+      // 移除字符串字面量和行内注释，避免误匹配 'END' / "BEGIN" 等
+      const codeOnly = line.replace(/'[^']*'/g, "")   // 单引号字符串
+        .replace(/--.*$/, "")                          // 行尾注释（前面已跳过纯注释行，但行内注释仍需处理）
+      const begins = (codeOnly.match(/\bBEGIN\b/gi) || []).length
       // 排除 END IF / END LOOP / END CASE 等非块结束的 END
-      const ends = (line.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
+      const ends = (codeOnly.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
       depth += begins - ends
-      if (depth <= 0 && line.match(/\bEND\b/i) && !line.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
+      // 仅当 depth 严格递减到 0 且原始行含真实 END（排除 END IF/LOOP/CASE）时关闭过程
+      if (depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
         updateProcedureLineRange(pkg, currentProc.name, currentProc.startLine, i + 1, currentProc.type)
         currentProc = null
+        depth = 0
+      } else if (depth < 0) {
+        // 防御性重置：depth 不应为负（可能是未过滤的边缘情况），归零避免后续误判
         depth = 0
       }
     }
@@ -749,15 +757,18 @@ function updateProcedureLineRange(
 
 /** 收集目录下所有 PL/SQL 相关文件（.pks 在 .pkb 前，确保 spec 先处理） */
 function collectSourceFiles(sourcePath: string): string[] {
-  const extensions = new Set([".sql", ".pks", ".pkb", ".pls"])
+  const extensions = new Set(VALID_SOURCE_EXTENSIONS)
   const files: string[] = []
 
   function walk(dir: string): void {
     const entries = readdirSync(dir, { withFileTypes: true })
     for (const entry of entries) {
       const fullPath = join(dir, entry.name)
-      // 跳过隐藏目录和 node_modules
+      // 跳过隐藏目录、node_modules
+      // 跳过 schema-fetcher 自动生成的 ddl-output（需含 .generated 标记，用户同名目录不跳过）
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue
+      if (entry.name === GENERATED_OUTPUT_DIR && entry.isDirectory()
+          && existsSync(join(fullPath, GENERATED_MARKER))) continue
       if (entry.isDirectory()) {
         walk(fullPath)
       } else if (entry.isFile() && extensions.has(extname(entry.name).toLowerCase())) {

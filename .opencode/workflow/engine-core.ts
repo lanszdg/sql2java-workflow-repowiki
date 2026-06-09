@@ -31,10 +31,17 @@ export const FIX_LIMITS = {
 /** 完成哨兵 */
 export const DONE_SENTINEL = "__done__" as const
 
+/** 格式化 Zod 校验错误为可读字符串（供 engine-core 和 plugin 共用） */
+export function formatZodIssues(error: { issues: Array<{ path: (string | number)[]; message: string }> }): string {
+  return error.issues
+    .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+    .join("\n")
+}
+
 /** 引擎错误类型，用于区分预期错误（如 not found）和真实错误（如 corrupted JSON） */
 export class WorkflowEngineError extends Error {
-  readonly code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE"
-  constructor(message: string, code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE") {
+  readonly code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE" | "INVALID_DEFINITION"
+  constructor(message: string, code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE" | "INVALID_DEFINITION") {
     super(message)
     this.name = "WorkflowEngineError"
     this.code = code
@@ -164,9 +171,9 @@ export class WorkflowEngine {
 
   start(defId: string, runId: string, metadata?: Record<string, unknown>): WorkflowRun {
     const def = this.definitions.get(defId)
-    if (!def) throw new Error(`Workflow definition "${defId}" not found`)
+    if (!def) throw new WorkflowEngineError(`Workflow definition "${defId}" not found`, "INVALID_DEFINITION")
     const firstPhase = def.phases[0]
-    if (!firstPhase) throw new Error(`Workflow "${defId}" has no phases`)
+    if (!firstPhase) throw new WorkflowEngineError(`Workflow "${defId}" has no phases`, "INVALID_DEFINITION")
 
     const now = new Date().toISOString()
     const run: WorkflowRun = {
@@ -365,11 +372,11 @@ export class WorkflowEngine {
   confirm(runId: string): WorkflowRun {
     const run = this.getRun(runId)
     if (run.status !== "paused") {
-      throw new Error(`Cannot confirm: run status is "${run.status}", expected "paused"`)
+      throw new WorkflowEngineError(`Cannot confirm: run status is "${run.status}", expected "paused"`, "INVALID_STATE")
     }
     const currentEntry = this.findCurrentEntry(run)
     if (!currentEntry) {
-      throw new Error("No current phase entry found")
+      throw new WorkflowEngineError("No current phase entry found", "INVALID_STATE")
     }
     const now = new Date().toISOString()
     currentEntry.status = "in_progress"
@@ -384,7 +391,7 @@ export class WorkflowEngine {
     const run = this.getRun(runId)
     const def = this.getDefinition(run.definitionId)
     const currentEntry = this.findCurrentEntry(run)
-    if (!currentEntry) throw new Error("No current active phase entry to retry (expected in_progress, pending, or failed)")
+    if (!currentEntry) throw new WorkflowEngineError("No current active phase entry to retry (expected in_progress, pending, or failed)", "INVALID_STATE")
 
     const phaseConfig = def.phases.find(p => p.name === run.currentPhase)
 
@@ -509,9 +516,7 @@ export class WorkflowEngine {
     }
     const validationResult = WorkflowRunSchema.safeParse(parsed)
     if (!validationResult.success) {
-      const issues = validationResult.error.issues
-        .map(i => `  - ${i.path.join(".")}: ${i.message}`)
-        .join("\n")
+      const issues = formatZodIssues(validationResult.error)
       throw new WorkflowEngineError(`Run file schema validation failed: ${filePath}\n${issues}`, "VALIDATION_FAILED")
     }
     const run = validationResult.data as WorkflowRun
@@ -634,7 +639,7 @@ export class WorkflowEngine {
 
   private getDefinition(defId: string): WorkflowDefinition {
     const def = this.definitions.get(defId)
-    if (!def) throw new Error(`Workflow definition "${defId}" not found`)
+    if (!def) throw new WorkflowEngineError(`Workflow definition "${defId}" not found`, "INVALID_DEFINITION")
     return def
   }
 

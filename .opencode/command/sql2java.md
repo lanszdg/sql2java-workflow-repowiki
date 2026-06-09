@@ -17,11 +17,17 @@ permission:
 ### 语法
 
 ```
-/sql2java <phases> <path>
+/sql2java [--db_conf <config_path>] <phases> <path>
 ```
 
+- `--db_conf <config_path>`: 可选。指定数据库配置文件路径（db.xml，Oracle JDBC 连接描述符格式）。未指定时自动在 `<path>` 目录下查找 `db.xml`
 - `<phases>`: 可选。逗号分隔的阶段名，或模式关键字
 - `<path>`: PL/SQL 源码目录路径
+
+### 参数提取顺序
+
+1. 从 `$ARGUMENTS` 中提取 `--db_conf <path>`，记为 `dbConf`，从参数中移除
+2. 按以下规则路由剩余参数
 
 ### 已知阶段名
 
@@ -156,11 +162,27 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 
 ### 步骤
 
-1. **校验 path**：确认路径存在且包含 `.sql` / `.pks` / `.pkb` 文件
+1. **校验 path**：确认路径存在
    ```bash
-   find <path> -type f \( -name "*.sql" -o -name "*.pks" -o -name "*.pkb" \) | head -5
+   test -d <path> && echo "exists" || echo "not found"
    ```
-   无文件 → 报错退出
+   引擎在扫描后会自动校验目录包含可处理文件（package、table、trigger 或 standalone procedure），无需手动检查文件类型。
+
+1.5 **Schema 预获取**
+
+   数据库配置按以下顺序查找（优先级从高到低）：
+
+   1. `--db_conf` 参数指定的路径（`dbConf` 变量）
+   2. `<path>/db.xml`（项目根目录自动发现）
+
+   ```bash
+   # 按优先级检测
+   test -n "$dbConf" && test -f "$dbConf" && echo "found: $dbConf"
+   test -f "<path>/db.xml" && echo "found: <path>/db.xml"
+   ```
+
+   - **有配置（db.xml）** → workflow start 会自动连接数据库获取 schema，生成 DDL 文件到 `<path>/ddl-output/` 目录下（即使已有 PL/SQL 文件也会获取），然后继续正常流程
+   - **无配置** → 跳过 schema 获取，直接使用已有的 SQL/PLSQL 文件
 
 2. **生成 runId**：`run-{YYYYMMDD-HHmmss}`（当前日期时间）
    ```bash
@@ -169,7 +191,7 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 
 3. **启动工作流**：
    ```javascript
-   workflow({ action: "start", runId: "run-20260601-100000", sourcePath: "<path>" })
+   workflow({ action: "start", runId: "run-20260601-100000", sourcePath: "<path>", dbConf: dbConf })
    ```
 
 4. **进入 inventory 阶段**：后续由 agent + workflow 工具自动推进
@@ -192,3 +214,76 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 | review | plan.json + scaffold.json + analysis.json + analysis-packages/ |
 | verify | plan.json + scaffold.json |
 | fix | analysis.json + analysis-packages/ + plan.json + scaffold.json + review-summary.json 或 verify-summary.json + translations/ |
+
+---
+
+## 数据库配置参考
+
+当项目目录下放置 `db.xml` 文件时，工作流启动时会自动连接数据库获取 schema 并生成 DDL 文件。
+即使项目已包含 PL/SQL 文件（.pks/.pkb），有 db.xml 配置时仍会拉取 schema 以获取完整的表结构定义。
+
+### 配置文件位置
+
+- **推荐**：放在项目源码目录下（如 `example_project/db.xml`），自动发现
+- **显式指定**：通过 `--db_conf /path/to/db.xml` 参数指定
+
+### 示例（Service Name，推荐）
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<database>
+  <url>jdbc:oracle:thin:@db-host.example.com:1521/ORCLCDB</url>
+  <user>schema_reader</user>
+  <password>env:ORACLE_DB_PASSWORD</password>
+  <schema>ERP_OWNER</schema>
+  <tableFilter>T_%</tableFilter>
+</database>
+```
+
+### 示例（SID，旧式连接）
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<database>
+  <url>jdbc:oracle:thin:@db-host.example.com:1521:ORCLCDB</url>
+  <user>schema_reader</user>
+  <password>env:ORACLE_DB_PASSWORD</password>
+  <schema>ERP_OWNER</schema>
+</database>
+```
+
+### 示例（TNS 描述符）
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<database>
+  <url>jdbc:oracle:thin:@(description=(address=(host=db-host)(port=1521))(connect_data=(service_name=ORCLCDB)))</url>
+  <user>schema_reader</user>
+  <password>env:ORACLE_DB_PASSWORD</password>
+</database>
+```
+
+### 配置项说明
+
+| XML 标签 | 必填 | 默认值 | 说明 |
+|----------|------|--------|------|
+| `<url>` | 是 | — | Oracle JDBC 连接 URL（支持 Service Name、SID、TNS 描述符三种格式） |
+| `<user>` | 是 | — | 数据库用户名 |
+| `<password>` | 是 | — | 密码。支持 `env:VAR_NAME` 引用环境变量（推荐），也可直接写明文 |
+| `<schema>` | 否 | user 大写 | 要获取 schema 的 Oracle owner |
+| `<fetchTables>` | 否 | `true` | 是否获取表定义 |
+| `<fetchTriggers>` | 否 | `true` | 是否获取触发器 |
+| `<fetchViews>` | 否 | `true` | 是否获取视图 |
+| `<fetchSequences>` | 否 | `true` | 是否获取序列 |
+| `<fetchObjectTypes>` | 否 | `true` | 是否获取对象类型 |
+| `<tableFilter>` | 否 | — | 表名过滤（SQL LIKE 语法，如 `T_%`） |
+| `<triggerFilter>` | 否 | — | 触发器名过滤 |
+| `<viewFilter>` | 否 | — | 视图名过滤 |
+| `<sequenceFilter>` | 否 | — | 序列名过滤 |
+| `<typeFilter>` | 否 | — | 对象类型名过滤 |
+
+### 安全建议
+
+- **密码**：优先使用 `<password>env:ORACLE_DB_PASSWORD</password>` 引用环境变量，避免明文写入配置文件
+- **权限**：连接用户只需 `SELECT` 权限（访问 `all_tab_columns`、`all_constraints` 等数据字典视图），建议创建只读账号
+- **版本控制**：建议将 db.xml 加入 .gitignore，避免密码泄露

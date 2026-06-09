@@ -11,7 +11,7 @@
  */
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { WorkflowEngine, WorkflowEngineError, type WorkflowRun } from "../workflow/engine-core"
+import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
 import {
@@ -209,7 +209,7 @@ function validateInventoryPackages(
 
   // 3. 逐包校验（大小写不敏感匹配文件名，缓存目录列表避免 N 次 readdirSync）
   const pkgSchema = getInventoryPackageSchema()
-  const pkgDirEntries = readdirSync(pkgDir)
+  const pkgDirEntries = readdirSync(pkgDir, { withFileTypes: true })
   for (const pkgName of expectedPackages) {
     const actualFileName = findFileCaseInsensitive(pkgDir, pkgName, pkgDirEntries)
     if (!actualFileName) {
@@ -221,9 +221,7 @@ function validateInventoryPackages(
       const parsed = JSON.parse(raw)
       const result = pkgSchema.safeParse(parsed)
       if (!result.success) {
-        const errors = result.error.issues
-          .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
-          .join("\n")
+        const errors = formatZodIssues(result.error)
         return `Zod validation failed for inventory-packages/${actualFileName}:\n${errors}`
       }
       if (parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
@@ -276,7 +274,7 @@ function validateAnalysisPackages(
 
   // 逐包校验（大小写不敏感匹配文件名，缓存目录列表避免 N 次 readdirSync）
   const pkgSchema = getAnalysisPackageSchema()
-  const pkgDirEntries = readdirSync(analysisPackagesDir)
+  const pkgDirEntries = readdirSync(analysisPackagesDir, { withFileTypes: true })
   for (const pkgName of expectedPackages) {
     const actualFileName = findFileCaseInsensitive(analysisPackagesDir, pkgName, pkgDirEntries)
     if (!actualFileName) {
@@ -288,9 +286,7 @@ function validateAnalysisPackages(
       const parsed = JSON.parse(raw)
       const result = pkgSchema.safeParse(parsed)
       if (!result.success) {
-        const errors = result.error.issues
-          .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
-          .join("\n")
+        const errors = formatZodIssues(result.error)
         return `Zod validation failed for analysis-packages/${actualFileName}:\n${errors}`
       }
       if (parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
@@ -340,9 +336,7 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       const parsed = JSON.parse(raw)
       const result = topLevelSchema.safeParse(parsed)
       if (!result.success) {
-        const errors = result.error.issues
-          .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
-          .join("\n")
+        const errors = formatZodIssues(result.error)
         return `Zod validation failed for ${artifactFileName}.json:\n${errors}`
       }
 
@@ -434,9 +428,7 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
         const parsed = JSON.parse(raw)
         const result = perPackageSchema.safeParse(parsed)
         if (!result.success) {
-          const errors = result.error.issues
-            .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
-            .join("\n")
+          const errors = formatZodIssues(result.error)
           return `Zod validation failed for translations/${actualDirName}/${pkgFileName}.json:\n${errors}`
         }
       } catch (e: any) {
@@ -457,9 +449,7 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
         const parsed = JSON.parse(raw)
         const result = summarySchema.safeParse(parsed)
         if (!result.success) {
-          const errors = result.error.issues
-            .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
-            .join("\n")
+          const errors = formatZodIssues(result.error)
           return `Zod validation failed for ${summaryPhase}.json:\n${errors}`
         }
         // verify-summary: 校验 testFiles[] 中的路径实际存在（兼容相对路径）
@@ -534,13 +524,18 @@ function validateJsonContent(fullPath: string, name: string): boolean {
  * 返回磁盘上的实际文件名（含 .json），未找到返回 null。
  * 可传入预读的 entries 列表以避免重复 readdirSync。
  */
-function findFileCaseInsensitive(dir: string, targetName: string, cachedEntries?: string[]): string | null {
+function findFileCaseInsensitive(dir: string, targetName: string, cachedEntries?: import("node:fs").Dirent[]): string | null {
   const targetUpper = targetName.toUpperCase()
+  // 预编译正则：仅匹配单个 .json 后缀，避免 .json.json 被过度剥离
+  const jsonSuffixRe = /\.json$/i
   try {
-    const entries = cachedEntries ?? readdirSync(dir)
+    const entries = cachedEntries ?? readdirSync(dir, { withFileTypes: true })
     for (const entry of entries) {
-      if (entry.toUpperCase().replace(/(\.json)+$/i, "") === targetUpper) {
-        return entry
+      // 仅匹配文件（排除子目录），且必须以 .json 结尾
+      if (!entry.isFile() || !jsonSuffixRe.test(entry.name)) continue
+      const nameWithoutExt = entry.name.replace(jsonSuffixRe, "").toUpperCase()
+      if (nameWithoutExt === targetUpper) {
+        return entry.name
       }
     }
   } catch {
@@ -570,26 +565,31 @@ function findDirCaseInsensitive(parentDir: string, targetName: string, cachedEnt
   return null
 }
 
-/** 递归截断对象中所有超过 maxLength 的字符串字段（含嵌套对象/数组） */
-function truncateStringsDeep(obj: unknown, maxLength: number): void {
-  if (!obj || typeof obj !== "object") return
+/** 递归截断对象中所有超过 maxLength 的字符串字段（含嵌套对象/数组），返回新对象不修改原始 */
+function truncateStringsDeep(obj: unknown, maxLength: number): unknown {
+  if (!obj || typeof obj !== "object") return obj
   if (Array.isArray(obj)) {
-    for (let i = 0; i < obj.length; i++) {
-      if (typeof obj[i] === "string" && obj[i].length > maxLength) {
-        obj[i] = obj[i].slice(0, maxLength) + `\n... [truncated, total ${obj[i].length} bytes]`
-      } else if (typeof obj[i] === "object" && obj[i] !== null) {
-        truncateStringsDeep(obj[i], maxLength)
+    return obj.map(item => {
+      if (typeof item === "string" && item.length > maxLength) {
+        return item.slice(0, maxLength) + `\n... [truncated, total ${item.length} bytes]`
+      } else if (typeof item === "object" && item !== null) {
+        return truncateStringsDeep(item, maxLength)
       }
-    }
+      return item
+    })
   } else {
+    const result: Record<string, unknown> = {}
     for (const key of Object.keys(obj as Record<string, unknown>)) {
       const val = (obj as Record<string, unknown>)[key]
       if (typeof val === "string" && val.length > maxLength) {
-        (obj as Record<string, unknown>)[key] = val.slice(0, maxLength) + `\n... [truncated, total ${val.length} bytes]`
+        result[key] = val.slice(0, maxLength) + `\n... [truncated, total ${val.length} bytes]`
       } else if (typeof val === "object" && val !== null) {
-        truncateStringsDeep(val, maxLength)
+        result[key] = truncateStringsDeep(val, maxLength)
+      } else {
+        result[key] = val
       }
     }
+    return result
   }
 }
 
@@ -651,6 +651,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         artifact: zFn.any().optional(),
         result: zFn.enum(["passed", "failed"]).optional(),
         phases: zFn.string().optional(),        // --phases 用
+        dbConf: zFn.string().optional(),        // --db_conf 用
       },
       execute: async (args: any) => {
         switch (args.action) {
@@ -684,6 +685,59 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
+            // ── 前置步骤：schema 获取（有 db.xml 配置时触发，无论是否已有 SQL 文件）──
+            // fetchSchemaIfNeeded 内部自行判断 db.xml 是否存在，无配置时静默返回 { fetched: false }
+            let fetchStatus = "skipped"
+            if (args.sourcePath) {
+              const srcPath = args.sourcePath as string
+
+              // Step 1: 动态加载模块
+              let fetchSchemaIfNeeded: typeof import("../workflow/schema-fetcher").fetchSchemaIfNeeded
+              let cleanupDdl: typeof import("../workflow/schema-fetcher").cleanupGeneratedDdl
+              try {
+                const mod = await import("../workflow/schema-fetcher")
+                fetchSchemaIfNeeded = mod.fetchSchemaIfNeeded
+                cleanupDdl = mod.cleanupGeneratedDdl
+              } catch (e: any) {
+                const isModuleNotFound = e.code === "MODULE_NOT_FOUND"
+                  || /Cannot find module/.test(e.message)
+                const hint = isModuleNotFound
+                  ? "schema-fetcher 模块加载失败，可能缺少依赖。请执行：cd .opencode && npm install"
+                  : `无法加载 schema-fetcher 模块: ${e.message}`
+                return {
+                  title: "Schema Error",
+                  output: hint,
+                  metadata: { runId, error: e.message },
+                }
+              }
+
+              // Step 2: 执行 schema 获取
+              try {
+                const fetchResult = await fetchSchemaIfNeeded(srcPath, args.dbConf as string | undefined)
+                if (fetchResult.error) {
+                  // schema fetch 返回错误时清理已生成的 ddl-output，避免残留
+                  cleanupDdl(srcPath)
+                  return {
+                    title: "Schema Error",
+                    output: fetchResult.error,
+                    metadata: { runId, error: fetchResult.error },
+                  }
+                }
+                if (fetchResult.fetched && fetchResult.result) {
+                  const r = fetchResult.result
+                  fetchStatus = `tables:${r.tablesFetched} views:${r.viewsFetched} triggers:${r.triggersFetched} seqs:${r.sequencesFetched} types:${r.objectTypesFetched}`
+                }
+              } catch (e: any) {
+                // schema fetch 抛异常时清理已生成的 ddl-output，避免残留
+                cleanupDdl(srcPath)
+                return {
+                  title: "Schema Error",
+                  output: `Schema 获取失败: ${e.message}`,
+                  metadata: { runId, error: e.message },
+                }
+              }
+            }
+
             // 预扫描：在 engine.start 之前扫描源码生成 inventory-index.json
             let scanStatus = "skipped"
             if (args.sourcePath) {
@@ -698,9 +752,31 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   JSON.stringify(index, null, 2),
                   "utf-8",
                 )
+
+                // F4: 校验扫描结果非空
+                const total = index.packages.length + index.tables.length
+                  + index.triggers.length + index.standaloneProcedures.length
+                  + index.views.length + index.sequences.length
+                if (total === 0) {
+                  if (fetchStatus !== "skipped") cleanupDdl(args.sourcePath as string)
+                  return {
+                    title: "Empty Source",
+                    output: `源码目录 "${args.sourcePath}" 未找到任何可处理的 PL/SQL 对象（package、table、trigger、standalone procedure）。请确认目录下包含 .sql/.pks/.pkb/.pls 文件。`,
+                    metadata: { runId, error: "empty_source" },
+                  }
+                }
+
                 scanStatus = `${index.scannerUsed} | ${index.packages.length} pkgs | ${index.tables.length} tables | ${index.triggers.length} triggers`
+                if (fetchStatus !== "skipped") {
+                  scanStatus = `fetch: ${fetchStatus} | scan: ${scanStatus}`
+                }
               } catch (e: any) {
-                scanStatus = `failed: ${e.message}`
+                if (fetchStatus !== "skipped") cleanupDdl(args.sourcePath as string)
+                return {
+                  title: "Scan Error",
+                  output: `源码扫描失败: ${e.message}`,
+                  metadata: { runId, error: e.message },
+                }
               }
             }
 
@@ -1122,9 +1198,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       try {
         const j = JSON.stringify(output)
         if (j?.length > 50000) {
-          // 递归截断所有超过阈值的字符串字段（含嵌套对象/数组），保留结构
+          // 递归截断所有超过阈值的字符串字段（含嵌套对象/数组），返回新对象不修改原始
           if (output && typeof output === "object") {
-            truncateStringsDeep(output, 10000)
+            const truncated = truncateStringsDeep(output, 10000)
+            // 将截断后的字段写回 output（仅写回截断后的顶级字段，避免替换整个对象引用）
+            if (truncated && typeof truncated === "object" && !Array.isArray(truncated)) {
+              Object.assign(output as Record<string, unknown>, truncated as Record<string, unknown>)
+            }
           }
         }
       } catch {

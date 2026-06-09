@@ -22,7 +22,7 @@ export function findOpencodeDir(): string {
   return join(dirname(__filename), "..")
 }
 
-/** 读取 package.json 中的 dependencies */
+/** 读取 package.json 中的 dependencies（不含 optionalDependencies，可选依赖由使用方自行处理） */
 function getRequiredDeps(opencodeDir: string): string[] {
   const pkgPath = join(opencodeDir, "package.json")
   try {

@@ -474,6 +474,7 @@ const PHASE_FILENAME_MAP: Record<string, string> = {
   analyze: "analysis",       // phase="analyze" → 文件名 analysis.json
   plan: "plan",
   scaffold: "scaffold",
+  translate: "translation",  // phase="translate" → 文件名 translation.json
   fix: "fix",
 }
 

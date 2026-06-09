@@ -3,5 +3,8 @@
     "@griffithswaite/ts-plsql-parser": "^1.0.5",
     "@opencode-ai/plugin": "1.16.0",
     "zod": "^3.23.0"
+  },
+  "optionalDependencies": {
+    "oracledb": "^7.0.0"
   }
 }
