@@ -130,7 +130,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
   const callGraph: Record<string, string[]> = {}
 
   for (const filePath of files) {
-    const code = readFileSync(filePath, "utf-8")
+    const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const relPath = relative(sourcePath, filePath)
     const ext = extname(filePath).toLowerCase()
 
@@ -468,7 +468,7 @@ export function scanWithRegex(sourcePath: string): InventoryIndex {
   const callGraph: Record<string, string[]> = {}
 
   for (const filePath of files) {
-    const code = readFileSync(filePath, "utf-8")
+    const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const relPath = relative(sourcePath, filePath)
     const ext = extname(filePath).toLowerCase()
 

@@ -21,6 +21,12 @@ import {
 } from "../workflow/artifact-schemas"
 import { scanSource } from "../workflow/plsql-scanner"
 import { ensureDeps, findOpencodeDir } from "../workflow/ensure-deps"
+import {
+  PhaseMetricsCollector,
+  generateRunMetrics, formatPhaseReport, formatFinalReport,
+  formatDuration,
+} from "../workflow/phase-metrics-collector"
+import type { PhaseMetrics } from "../workflow/phase-metrics-collector"
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
@@ -32,6 +38,19 @@ let currentWorkflowContext: {
   agentFile: string
   temperature: number
 } | null = null
+
+let activeCollector: PhaseMetricsCollector | null = null
+
+/** fix 阶段序号追踪（同一 runId 内递增） */
+const fixPhaseIndexMap = new Map<string, number>()
+
+/** 跨 session 恢复 fixIndex：从 metrics/ 目录下已有的 fix-*.json 文件数推导序号 */
+function recoverFixIndex(runId: string): number {
+  const metricsDir = join(ARTIFACT_DIR, runId, "metrics")
+  if (!existsSync(metricsDir)) return 0
+  const existing = readdirSync(metricsDir).filter(f => /^fix-\d+\.json$/.test(f))
+  return existing.length
+}
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
@@ -78,10 +97,44 @@ function setWorkflowContext(run: WorkflowRun): void {
     agentFile: phaseConfig?.agentFile ?? "unknown",
     temperature: phaseConfig?.temperature ?? 0.1,
   }
+  // ── Metrics: 创建 collector ──
+  const isFix = phaseConfig?.isFixPhase
+  const fixIndex = isFix ? nextFixIndex(run.runId) : undefined
+  const artifactsDir = join(ARTIFACT_DIR, run.runId)
+  activeCollector = new PhaseMetricsCollector(
+    run.currentPhase ?? "unknown", run.runId, artifactsDir, fixIndex,
+  )
+}
+
+/** 统一的 fixIndex 递增逻辑：优先读内存 Map，回退到磁盘文件计数 */
+function nextFixIndex(runId: string): number {
+  const existing = fixPhaseIndexMap.get(runId)
+  const fixIndex = existing !== undefined ? existing + 1 : recoverFixIndex(runId) + 1
+  fixPhaseIndexMap.set(runId, fixIndex)
+  return fixIndex
+}
+
+/** 尝试将当前 collector 的数据持久化到磁盘（用于 abort/retry-exhausted 等非正常终止场景） */
+function persistCollectorIfActive(runId: string): void {
+  if (!activeCollector || !currentWorkflowContext) return
+  try {
+    const artifactsDir = join(ARTIFACT_DIR, runId)
+    const snap = activeCollector.getSnapshot()
+    if (snap.apiCallCount > 0 || snap.totalToolCallCount > 0) {
+      activeCollector.persistAsIncomplete()
+      console.warn(`[metrics] 非正常终止时持久化了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
+    }
+  } catch (e: any) {
+    console.warn(`[metrics] 非正常终止 persist 失败: ${e.message}`)
+  }
 }
 
 function clearWorkflowContext(): void {
+  if (currentWorkflowContext) {
+    fixPhaseIndexMap.delete(currentWorkflowContext.runId)
+  }
   currentWorkflowContext = null
+  activeCollector = null
   _cachedJavaCodeSpec = null
   _cachedSpecMtime = null
 }
@@ -860,35 +913,79 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
             const adv = engine.advance(runId, { result: args.result })
 
+            // ── Metrics: finalize 当前 collector（仅当阶段成功完成时） ──
+            // try-catch 保护：engine.advance() 已提交状态，metrics I/O 失败不应阻断流程
+            let phaseReportText: string | undefined
+            let phaseMetrics: PhaseMetrics | undefined
+            try {
+              if (activeCollector && !adv.rejected && !adv.fixFailed && statusBefore?.currentPhase) {
+                const completedPhase = statusBefore.currentPhase
+                const entries = adv.run.phaseHistory.filter(
+                  (e: any) => e.phase === completedPhase && e.status === "completed" && e.completedAt
+                )
+                const entry = entries[entries.length - 1]
+                if (entry) {
+                  phaseMetrics = activeCollector.finalize(entry, join(ARTIFACT_DIR, runId))
+                  activeCollector.persist()
+                  phaseReportText = formatPhaseReport(phaseMetrics)
+                  const reportsDir = join(ARTIFACT_DIR, runId, "reports")
+                  const reportFile = phaseMetrics.fixIndex != null
+                    ? `fix-${phaseMetrics.fixIndex}-report.txt`
+                    : `${completedPhase}-report.txt`
+                  mkdirSync(reportsDir, { recursive: true })
+                  writeFileSync(join(reportsDir, reportFile), phaseReportText, "utf-8")
+                }
+              }
+            } catch (e: any) {
+              console.warn(`[metrics] 阶段报告生成失败: ${e.message}`)
+            }
+
             if (adv.finished) {
+              // ── Metrics: 生成最终报告 ──
+              let finalText: string | undefined
+              try {
+                const runMetrics = generateRunMetrics(runId, adv.run, join(ARTIFACT_DIR, runId))
+                const metricsDir = join(ARTIFACT_DIR, runId, "metrics")
+                mkdirSync(metricsDir, { recursive: true })
+                writeFileSync(join(metricsDir, "run-metrics.json"), JSON.stringify(runMetrics, null, 2), "utf-8")
+                finalText = formatFinalReport(runMetrics)
+                const reportsDir = join(ARTIFACT_DIR, runId, "reports")
+                mkdirSync(reportsDir, { recursive: true })
+                writeFileSync(join(reportsDir, "final-report.txt"), finalText, "utf-8")
+              } catch (e: any) {
+                console.warn(`[metrics] 最终报告生成失败: ${e.message}`)
+              }
               clearWorkflowContext()
               const isWithIssues = adv.run.status === "completed_with_issues"
               const prevPhase = statusBefore?.currentPhase ?? ""
-              const endBanner = formatPhaseEndBanner(prevPhase)
+              const duration = phaseMetrics?.wallDurationMs != null ? formatDuration(phaseMetrics.wallDurationMs) : undefined
+              const endBanner = formatPhaseEndBanner(prevPhase, duration)
               const finalMsg = isWithIssues
                 ? "⚠️ 工作流完成，但存在未解决问题"
                 : "🎉 工作流全部完成！"
               return {
                 title: isWithIssues ? "Completed with Issues" : "Completed",
                 output: `${endBanner}${finalMsg}\nrunId: ${runId} | status: ${adv.run.status}`,
-                metadata: { status: adv.run.status },
+                metadata: { status: adv.run.status, reportPath: join(ARTIFACT_DIR, runId, "reports", "final-report.txt") },
               }
             }
 
             if (adv.waitingForConfirmation) {
               const prevPhase = statusBefore?.currentPhase ?? ""
-              const endBanner = formatPhaseEndBanner(prevPhase)
+              const duration = phaseMetrics?.wallDurationMs != null ? formatDuration(phaseMetrics.wallDurationMs) : undefined
+              const endBanner = formatPhaseEndBanner(prevPhase, duration)
               const pausedPhase = adv.run.currentPhase ?? ""
               const pausedDesc = adv.nextPhase?.description ?? pausedPhase
               return {
                 title: "Paused",
                 output: `${endBanner}⏸ ${pausedPhase}（${pausedDesc}）等待确认。请审阅后调用：\nworkflow({action:"confirm",runId:"${runId}"})`,
-                metadata: { waitingForConfirmation: true },
+                metadata: { waitingForConfirmation: true, reportPath: phaseReportText ? join(ARTIFACT_DIR, runId, "reports", `${statusBefore?.currentPhase ?? "unknown"}-report.txt`) : undefined },
               }
             }
 
             if (adv.rejected) {
               // 不清理 workflowContext：LLM 应修正 artifact 后重新 advance，当前 phase context 仍有效
+              // activeCollector 保持活跃，继续累计
               return {
                 title: "Rejected",
                 output: adv.rejectionReason!,
@@ -898,6 +995,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
             if (adv.fixFailed) {
               // 不清理 workflowContext：LLM 应调用 retry()，retry 仍处于 fix phase，fix-phase context 仍有效
+              // activeCollector 保持活跃，继续累计
               return {
                 title: "Fix Failed",
                 output: adv.rejectionReason!,
@@ -905,14 +1003,20 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
-            setWorkflowContext(adv.run)
+            // try-catch 保护：metrics collector 构造失败不应阻断流程
+            try {
+              setWorkflowContext(adv.run)
+            } catch (e: any) {
+              console.warn(`[metrics] collector 创建失败: ${e.message}`)
+            }
             const prevPhase = statusBefore?.currentPhase ?? ""
-            const endBanner = formatPhaseEndBanner(prevPhase)
+            const duration = phaseMetrics?.wallDurationMs != null ? formatDuration(phaseMetrics.wallDurationMs) : undefined
+            const endBanner = formatPhaseEndBanner(prevPhase, duration)
             const startBanner = formatPhaseStartBanner(adv.run.currentPhase)
             return {
               title: `→ ${adv.run.currentPhase}`,
               output: `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}`,
-              metadata: { runId, phase: adv.run.currentPhase },
+              metadata: { runId, phase: adv.run.currentPhase, reportPath: phaseReportText ? join(ARTIFACT_DIR, runId, "reports", `${statusBefore?.currentPhase ?? "unknown"}-report.txt`) : undefined },
             }
           }
 
@@ -936,6 +1040,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             if (!args.runId) throw new Error("runId required")
             const ret = engine.retry(args.runId)
             if (ret.exhausted) {
+              persistCollectorIfActive(args.runId)
               clearWorkflowContext()
               return {
                 title: "Exhausted",
@@ -945,6 +1050,22 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   terminalState: ret.terminalState,
                 },
               }
+            }
+            // ── Metrics: 重置 collector（retry 创建新 PhaseHistoryEntry，从零开始累计） ──
+            if (currentWorkflowContext) {
+              if (activeCollector) {
+                const snap = activeCollector.getSnapshot()
+                if (snap.apiCallCount > 0) {
+                  console.warn(`[metrics] retry 丢弃了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
+                }
+              }
+              const artifactsDir = join(ARTIFACT_DIR, currentWorkflowContext.runId)
+              const fixIndex = currentWorkflowContext.phase === "fix"
+                ? nextFixIndex(currentWorkflowContext.runId)
+                : undefined
+              activeCollector = new PhaseMetricsCollector(
+                currentWorkflowContext.phase, currentWorkflowContext.runId, artifactsDir, fixIndex,
+              )
             }
             return {
               title: `Retry ${ret.retryCount}`,
@@ -957,6 +1078,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           case "abort": {
             if (!args.runId) throw new Error("runId required")
             const r = engine.abort(args.runId)
+            persistCollectorIfActive(args.runId)
             clearWorkflowContext()
             return {
               title: "Aborted",
@@ -981,6 +1103,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const r = engine.status(args.runId)
             if (!r)
               return { title: "Not found", output: "No such run", metadata: {} }
+            // ── Metrics: 附加实时 metrics 快照（仅当 runId 匹配时） ──
+            const liveMetrics = activeCollector && activeCollector.runId === args.runId
+              ? activeCollector.getSnapshot()
+              : undefined
             return {
               title: r.status,
               output: JSON.stringify(
@@ -993,10 +1119,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                     status: h.status,
                     retry: h.retryCount,
                   })),
+                  ...(liveMetrics ? { liveMetrics } : {}),
                 },
                 null,
                 2
               ),
+              metadata: { runId: r.runId, ...(liveMetrics ? { liveMetrics } : {}) },
             }
           }
 
@@ -1319,6 +1447,44 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       console.error(`[workflow-engine] Failed to build system prompt: ${e.message}`)
     }
     return input
+  },
+
+  // ── Hook: event — Metrics 采集（message.part.updated 事件） ──
+  // try-catch 包裹整体：畸形事件或 SDK 变更不应杀死事件链
+  event: async ({ event }: { event: any }) => {
+    try {
+      if (!currentWorkflowContext || !activeCollector) return
+      if (event.type !== "message.part.updated") return
+      const part = event.properties?.part
+      if (!part) return
+
+      switch (part.type) {
+        case "step-finish":
+          activeCollector.recordStepFinish({
+            cost: part.cost ?? 0,
+            tokens: part.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            reason: part.reason ?? "unknown",
+          })
+          break
+        case "tool": {
+          const state = part.state
+          if (!state) break
+          if (state.status === "running" && state.time?.start) {
+            // 工具开始运行
+            activeCollector.recordToolCalled(part.callID, part.tool, state.time.start)
+          } else if ((state.status === "completed" || state.status === "error") && state.time) {
+            // 兜底：若未捕获 running 状态，先补录 start（幂等：recordToolCalled 会覆盖已有 entry）
+            activeCollector.recordToolCalled(part.callID, part.tool, state.time.start)
+            activeCollector.recordToolCompleted(
+              part.callID, state.status === "completed" ? "completed" : "error", state.time.end,
+            )
+          }
+          break
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[metrics] event hook 处理失败: ${e.message}`)
+    }
   },
 })
 }
