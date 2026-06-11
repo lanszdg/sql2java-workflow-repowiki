@@ -137,6 +137,16 @@ permission:
    - ServiceImpl（业务逻辑实现，注入 Mapper）
    - DTO 类（OUT 参数、返回值包装）
    - 异常类（如有自定义异常）
+4. **生成测试代码**（填充 scaffold 生成的测试骨架）：
+   - 读取 scaffold 生成的测试骨架文件（路径从 `scaffold.json` 的 `testShells` 获取）
+   - 为每个 `// TODO: [test]` 测试方法填写实际测试逻辑：
+     - **arrange**：构造输入参数，设置 Mock 返回值（`when(...).thenReturn(...)`）
+     - **act**：调用被测方法
+     - **assert**：验证返回值（`assertEquals`、`assertNotNull`）和副作用（`verify(mapper).insert(...)`）
+   - 每个方法至少生成 happy path 测试；中/高复杂度方法额外生成 1-2 个异常路径测试
+   - 测试方法命名：`methodName_scenario_expectedBehavior`
+   - 所有注释使用中文
+   - **禁止**生成空方法体或 `// TODO: implement test`
 
 #### Step 3: 逐包持久化
 
@@ -149,7 +159,7 @@ translation.json 包含：
 - `status`：`"completed"`（全部完成）或 `"partial"`（部分完成）
 - `completedSubprograms`：已完成的子程序名列表
 - `totalSubprograms`：子程序总数
-- `files`：生成的 Java 文件列表（path + role）
+- `files`：生成的 Java 文件列表（path + role，包含生产代码和测试文件）
 - `decisions`：翻译决策记录（line, oracleConstruct, javaConstruct, reason, confidence）
 - `todos`：TODO 标记（file, issue, oracleLine, suggestion）
 
@@ -169,6 +179,9 @@ translation.json 包含：
 - [ ] 不确定的构造标记了 `// TODO: [translate] 标记人 标记时间 中文说明`
 - [ ] translation.json 记录了所有翻译决策和 TODO
 - [ ] Java 代码规约已全面遵守（命名、格式、注释语言、OOP、集合与异常等，详见注入的规约文档）
+- [ ] 每个 ServiceImpl 方法都有对应的测试方法（含完整 arrange→act→assert 逻辑）
+- [ ] 测试文件在 translation.json 的 files 数组中标记为 role `"test"`
+- [ ] 测试方法注释使用中文
 
 ---
 
@@ -209,7 +222,7 @@ translation.json 包含：
 对每个 mustFix 项：
 1. 定位到具体 Java 文件和行号
 2. 对照 `analysis-packages/{pkg}.json` 的子程序结构和源码理解问题
-3. 按五原则修复
+3. 按五原则修复（如果 mustFix 项涉及测试文件，同样修复测试代码）
 4. 更新对应的 translation.json
 
 #### Step 3: 写入 fix.json

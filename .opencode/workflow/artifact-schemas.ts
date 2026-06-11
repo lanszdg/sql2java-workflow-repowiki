@@ -296,6 +296,11 @@ export const ScaffoldSchema = z.object({
       file: z.string(),
       oraclePackage: z.string(),
     })),
+    testShells: z.array(z.object({
+      file: z.string(),
+      oraclePackage: z.string(),
+      testClass: z.string(),
+    })).optional(),
     commonClasses: z.array(z.object({
       file: z.string(),
       purpose: z.string(),
@@ -319,7 +324,7 @@ export const TranslationSchema = z.object({
     path: z.string(),
     role: z.enum([
       "mapper-interface", "mapper-xml", "service",
-      "service-impl", "dto", "exception",
+      "service-impl", "dto", "exception", "test",
     ]),
   })),
 
@@ -357,6 +362,8 @@ export const ReviewSchema = z.object({
         "todo-remaining",
         "naming-convention", "code-format", "oop-convention",
         "comment-convention", "collection-exception",
+        "version-compliance",
+        "test-completeness", "test-correctness",
       ]),
       passed: z.boolean(),
       detail: z.string(),
@@ -371,8 +378,8 @@ export const ReviewSchema = z.object({
   suggestions: z.array(z.string()),
   todoRemainingCount: z.number(),
 }).refine(
-  data => (data.passed === true) === (data.mustFix.length === 0),
-  { message: "passed 与 mustFix 必须一致：passed=true 时 mustFix 必须为空，passed=false 时 mustFix 必须非空" }
+  passedMustFixRefine.check,
+  { message: passedMustFixRefine.message }
 )
 
 // ============================================================================
@@ -390,8 +397,8 @@ export const ReviewSummarySchema = z.object({
   totalMustFix: z.number(),
   totalTodosRemaining: z.number(),
 }).refine(
-  data => data.allPassed === data.packageResults.every(p => p.passed),
-  { message: "allPassed 应与 packageResults 一致" }
+  allPassedRefine.check,
+  { message: allPassedRefine.message }
 )
 
 // ============================================================================
@@ -412,8 +419,8 @@ export const VerifySchema = z.object({
     issue: z.string(),
   })),
 }).refine(
-  data => (data.passed === true) === (data.mustFix.length === 0),
-  { message: "passed 与 mustFix 必须一致：passed=true 时 mustFix 必须为空，passed=false 时 mustFix 必须非空" }
+  passedMustFixRefine.check,
+  { message: passedMustFixRefine.message }
 )
 
 // ============================================================================
@@ -435,21 +442,36 @@ export const VerifySummarySchema = z.object({
     passed: z.boolean(),
     mybatisValid: z.boolean(),
   })),
+  testExecution: z.object({
+    executed: z.boolean(),
+    totalTests: z.number().optional(),
+    passedTests: z.number().optional(),
+    failedTests: z.number().optional(),
+    testErrors: z.array(z.object({
+      testClass: z.string(),
+      testMethod: z.string(),
+      message: z.string(),
+    })).optional(),
+    testFiles: z.array(z.string()),
+  }).optional(),
   testGeneration: z.object({
     generated: z.boolean(),
     testFiles: z.array(z.string()),
-  }),
+  }).optional(),
   totalTodosRemaining: z.number(),
   unresolvedIssues: z.array(z.object({
     packageName: z.string(),
     issue: z.string(),
   })).optional(),
 }).refine(
-  data => data.allPassed === data.packageResults.every(p => p.passed),
-  { message: "allPassed 应与 packageResults 一致" }
+  allPassedRefine.check,
+  { message: allPassedRefine.message }
 ).refine(
   data => data.compilation.success === true || (data.compilation.errors !== undefined && data.compilation.errors.length > 0),
   { message: "compilation.success=false 时 errors 必须非空" }
+).refine(
+  data => data.testExecution != null || data.testGeneration != null,
+  { message: "verify-summary 必须包含 testExecution 或 testGeneration（至少其一）" }
 )
 
 // ============================================================================
@@ -462,6 +484,24 @@ export const FixArtifactSchema = z.object({
   data => data.fixedPackages.length > 0,
   { message: "fixedPackages 不能为空，fix 必须至少修复一个包" }
 )
+
+// ============================================================================
+// 共享 Refine 描述（消除 ReviewSchema/VerifySchema 和 Summary Schema 之间的复制粘贴）
+// ============================================================================
+
+/** passed 与 mustFix 一致性校验描述 */
+const passedMustFixRefine = {
+  check: (data: { passed: boolean; mustFix: unknown[] }) =>
+    (data.passed === true) === (data.mustFix.length === 0),
+  message: "passed 与 mustFix 必须一致：passed=true 时 mustFix 必须为空，passed=false 时 mustFix 必须非空",
+} as const
+
+/** allPassed 与 packageResults 一致性校验描述 */
+const allPassedRefine = {
+  check: (data: { allPassed: boolean; packageResults: { passed: boolean }[] }) =>
+    data.allPassed === data.packageResults.every(p => p.passed),
+  message: "allPassed 应与 packageResults 一致",
+} as const
 
 // ============================================================================
 // Schema 查找辅助

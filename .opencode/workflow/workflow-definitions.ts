@@ -64,7 +64,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "verify",
-      description: "编译验证 + MyBatis 校验 + 测试骨架",
+      description: "编译验证 + MyBatis 校验 + 测试执行",
       agentFile: "agent/reviewer.md",
       temperature: 0.1,
       maxRetries: 2,

@@ -168,7 +168,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 ### 目标
 
-根据 plan.json 和 inventory.json 生成完整的 Maven 项目骨架，包括 pom.xml、目录结构、Entity 类、Mapper 空壳、Service 空壳、公共模块。
+根据 plan.json 和 inventory.json 生成完整的 Maven 项目骨架，包括 pom.xml、目录结构、Entity 类、Mapper 空壳、Service 空壳、测试类骨架、公共模块。
 
 ### 输入
 
@@ -213,7 +213,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 #### Step 2: 生成 pom.xml
 
-包含依赖：spring-boot-starter、spring-boot-starter-web、mybatis-spring-boot-starter、lombok、h2（测试用）。
+包含依赖：spring-boot-starter、spring-boot-starter-web、mybatis-spring-boot-starter、lombok、spring-boot-starter-test（测试用，含 JUnit 5 + Mockito）、h2（测试用）。
 
 > **pom.xml 的 `<java.version>`、`<source>`、`<target>`、Spring Boot parent 版本、MyBatis starter 版本必须与注入的 Java 代码规约中"Java 版本与框架配置"段落完全一致。** 依赖的命名空间（javax/jakarta）也必须与规约一致。
 
@@ -250,20 +250,48 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 - ServiceImpl（注入对应 Mapper，空壳方法）
 - 方法注释、Impl 后缀、@Override 注解、构造器注入等遵循注入的 Java 代码规约
 
+#### Step 6.5: 生成测试类骨架
+
+为每个有 `serviceImplClass` 的 packageMapping 生成对应测试类骨架。
+
+1. 从 `plan.json` 的 `packageMappings` 中筛选有 `serviceImplClass` 的映射
+2. 对每个映射在 `src/test/java/{packageBase}/` 下对应的包路径中生成 `{ServiceImplClass}Test.java`
+
+**测试类骨架模板**：
+- `@ExtendWith(MockitoExtension.class)` 类注解
+- `@Mock` 声明 Mapper 依赖（从 ServiceImpl 的构造器注入参数推导）
+- `@InjectMocks` 注入被测 ServiceImpl
+- 每个 ServiceImpl 中的公共方法对应一个空测试方法：
+  ```java
+  @Test
+  @DisplayName("{methodName} 测试")
+  void {methodName}_shouldComplete() {
+      // TODO: [test] 待 translate 阶段填充测试逻辑
+  }
+  ```
+- 类注释使用中文 Javadoc，包含 `@author sql2java-workflow` 和 `@date`
+
+**注意**：
+- 测试骨架只包含空方法和 TODO 标记，不包含实际测试逻辑（实际逻辑由 translate 阶段填充）
+- 与 ServiceImpl 空壳的生成模式一致：壳在这里，内容在 translate
+
 #### Step 7: 写入 scaffold.json
 
 组装符合 ScaffoldSchema 的 JSON，包含：
 - `projectRoot`：项目根目录
 - `structure`：目录列表和 pomXml 内容
-- `generated`：所有生成的文件清单
+- `generated`：所有生成的文件清单（entities、mapperInterfaces、serviceShells、testShells、commonClasses）
 - `conventions`：从 plan.json 复制
 - `basedOnPlanHash`：plan.json 的内容哈希（用于关联版本）
 
 ### 质量检查
 
 - [ ] pom.xml 可被 Maven 解析
+- [ ] pom.xml 包含 JUnit 5 + Mockito 测试依赖（spring-boot-starter-test）
 - [ ] 目录结构与 plan.json 的 packageBase 一致
 - [ ] Entity 类覆盖 inventory 中的所有表
 - [ ] Mapper 接口覆盖 plan.json 的所有 packageMappings
+- [ ] 测试类骨架覆盖所有有 serviceImplClass 的 packageMapping
+- [ ] 测试骨架方法签名与 ServiceImpl 公共方法一一对应
 - [ ] Java 文件可编译（包声明正确、import 齐全）
 - [ ] scaffold.json 的 generated 记录了所有已生成文件

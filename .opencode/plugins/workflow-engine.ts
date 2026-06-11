@@ -693,13 +693,19 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
           const errors = formatZodIssues(result.error)
           return `Zod validation failed for ${summaryPhase}.json:\n${errors}`
         }
-        // verify-summary: 校验 testFiles[] 中的路径实际存在（兼容相对路径）
-        if (summaryPhase === "verify-summary" && parsed.testGeneration?.generated) {
-          const missing = (parsed.testGeneration.testFiles as string[]).filter(
-            (f) => !existsSync(f) && !existsSync(join(artifactsDir, f)) && !existsSync(join(process.cwd(), f))
-          )
-          if (missing.length > 0) {
-            return `verify-summary declares testFiles that do not exist on disk:\n${missing.map((f) => `  - ${f}`).join("\n")}`
+        // verify-summary: 校验 testFiles[] 中的路径实际存在（兼容 testExecution 和旧 testGeneration）
+        const testOutput = parsed.testExecution ?? parsed.testGeneration
+        if (summaryPhase === "verify-summary" && testOutput) {
+          const shouldCheck = "executed" in testOutput
+            ? (testOutput as { executed: boolean }).executed
+            : (testOutput as { generated: boolean }).generated
+          if (shouldCheck) {
+            const missing = (testOutput.testFiles as string[]).filter(
+              (f) => !existsSync(f) && !existsSync(join(artifactsDir, f)) && !existsSync(join(process.cwd(), f))
+            )
+            if (missing.length > 0) {
+              return `verify-summary declares testFiles that do not exist on disk:\n${missing.map((f) => `  - ${f}`).join("\n")}`
+            }
           }
         }
       } catch (e: any) {

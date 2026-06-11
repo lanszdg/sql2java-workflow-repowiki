@@ -1,5 +1,5 @@
 ---
-description: 翻译质量审查专家，负责对照 Oracle PL/SQL 源码审查翻译等价性（review）和全局编译验证 + MyBatis 校验 + 测试骨架生成（verify）。用于工作流的 review 和 verify 阶段。
+description: 翻译质量审查专家，负责对照 Oracle PL/SQL 源码审查翻译等价性和测试代码质量（review）和全局编译验证 + MyBatis 校验 + 单元测试执行（verify）。用于工作流的 review 和 verify 阶段。
 mode: subagent
 temperature: 0.1
 tools:
@@ -66,6 +66,8 @@ permission:
 | 14 | comment-convention | 注释规约：中文注释、Javadoc 格式、@author/@date、枚举注释、TODO 格式 |
 | 15 | collection-exception | 集合与异常：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch、自定义异常 |
 | 16 | version-compliance | **版本合规性**：代码、pom.xml、依赖必须完全符合注入的 Java 代码规约中"Java 版本与框架配置"段落。对照"禁止的 Java 9+ 语法和 API"逐项检查代码，对照"pom.xml 构建配置"检查构建配置，对照"依赖命名空间"检查命名空间和依赖版本。**违反此项标记为 critical** |
+| 17 | test-completeness | 测试完整性：测试方法是否有真实逻辑（无空方法体、无 `// TODO: [test]` 残留）、arrange→act→assert 结构完整、断言有意义 |
+| 18 | test-correctness | 测试正确性：Mock 设置与生产代码逻辑匹配、@InjectMocks 目标正确、测试覆盖 happy path 和异常路径 |
 
 ### 严重级别定义
 
@@ -112,8 +114,12 @@ permission:
 对每个待审查的包：
 
 1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
-2. **逐子程序审查**：对每个子程序，按 15 类审查清单逐项检查
-3. **产出 per-package review.json**：每审完一个包立即写入，包含：
+2. **逐子程序审查**：对每个子程序，按 18 类审查清单逐项检查
+3. **审查测试代码**：读取测试类 Java 文件（`src/test/java/` 下对应的 `{ServiceImplClass}Test.java`）
+   - 按 test-completeness（#17）检查：无空方法体、无 `// TODO: [test]` 残留、arrange→act→assert 结构完整
+   - 按 test-correctness（#18）检查：Mock 设置与 ServiceImpl 依赖一致、断言覆盖关键逻辑
+   - 空 TODO 测试方法标记为 mustFix（severity: major）
+4. **产出 per-package review.json**：每审完一个包立即写入，包含：
    - `packageName`：Oracle 包名
    - `passed`：是否通过
    - `overallScore`：0-100 分
@@ -150,6 +156,8 @@ permission:
 - [ ] 注释语言为中文（comment-convention）已审查，英文注释标记为 major
 - [ ] 集合与异常（collection-exception）已审查：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch
 - [ ] 版本合规性（version-compliance）已审查：代码 API、pom.xml 配置、依赖命名空间均符合注入的 Java 代码规约中的"Java 版本与框架配置"
+- [ ] 测试代码已按 test-completeness（#17）和 test-correctness（#18）审查
+- [ ] 空 TODO 测试方法已标记为 mustFix（major severity）
 
 ---
 
@@ -157,7 +165,7 @@ permission:
 
 ### 目标
 
-全局编译验证 + 按包 MyBatis XML 校验 + 编译错误归因 + 测试骨架生成。产出 per-package verify.json 和顶层 verify-summary.json。
+全局编译验证 + 按包 MyBatis XML 校验 + 编译错误归因 + 单元测试执行。产出 per-package verify.json 和顶层 verify-summary.json。
 
 ### 输入
 
@@ -206,43 +214,27 @@ cd ${projectRoot} && mvn compile 2>&1
    - `todoRemainingCount`：TODO 残留数
    - `mustFix`：必须修复的问题（编译错误 + MyBatis 校验失败）
 
-#### Step 4: 生成单元测试
+#### Step 4: 执行单元测试
 
-为每个包生成**完整的单元测试**（仅生成，不执行），包含真实测试逻辑：
+运行 Maven 测试并收集结果：
 
-**数据准备**（每个包）：
-1. 读取 `analysis-packages/{package}.json` 获取方法签名、参数、返回类型、业务逻辑描述
-2. 读取该包的 `ServiceImpl` Java 源码，理解具体业务逻辑
-3. 读取 `plan.json` 的 typeMappings 和 exceptionStrategy
+```bash
+cd ${projectRoot} && mvn test 2>&1
+```
 
-**测试类结构**：
-- 测试类放在 `src/test/java/{packageBase}/` 下，命名为 `{ServiceName}ImplTest.java`
-- 使用 `@ExtendWith(MockitoExtension.class)`
-- 用 `@Mock` 声明所有依赖（Mapper、其他 Service）
-- 用 `@InjectMocks` 注入被测 ServiceImpl
-- **类注释使用中文 Javadoc**，包含 `@author` 和 `@date`
+解析测试输出，提取：
+- 总测试数、通过数、失败数
+- 每个失败测试的类名、方法名、错误信息
 
-**测试方法生成规则**（每个 Service 方法生成 1-3 个测试方法）：
+**测试结果归因**：
+- 根据测试类名匹配 `plan.json` 的 `packageMappings`（如 `CoreServiceImplTest` → `CORE_PKG`）
+- 将测试失败归入对应包的 verify.json 的 `mustFix`
+- 未匹配到包的测试失败归入 "GLOBAL"
 
-1. **happy path 测试**（必须）：验证正常输入下的主流程
-   - 根据方法签名构造合理的输入参数
-   - Mock 依赖返回预期数据（`when(...).thenReturn(...)`）
-   - 调用被测方法并断言结果（`assertEquals`, `assertNotNull`）
-   - 验证关键副作用（`verify(mapper).insert(...)`）
-
-2. **异常/边界测试**（根据复杂度）：
-   - 低复杂度：跳过
-   - 中/高复杂度：生成 1-2 个异常路径测试
-   - 模拟空值、异常抛出等场景
-   - 使用 `assertThrows` 验证异常
-
-3. **命名规范**：`methodName_scenario_expectedBehavior`
-   - 例：`createItem_withValidData_shouldInsertAndReturnId`
-   - 例：`getItem_whenNotFound_shouldThrowException`
-
-**禁止**：
-- 不得生成空方法体或 `// TODO: implement test`
-- 每个测试方法必须有 arrange（Mock 设置）→ act（调用）→ assert（断言）三个部分
+**增量模式**：
+- `mvn test` 全局执行（无法按包过滤）
+- 只将 `targetPackages` 范围内的测试失败记入 mustFix
+- 范围外的测试失败记录为 suggestion
 
 #### Step 5: 写入 verify-summary.json
 
@@ -250,7 +242,7 @@ cd ${projectRoot} && mvn compile 2>&1
 - `allPassed`：所有包是否都 passed
 - `compilation`：{ success, errors[] }
 - `packageResults`：每个包的摘要（packageName, passed, mybatisValid）
-- `testGeneration`：{ generated, testFiles[] }
+- `testExecution`：{ executed, totalTests, passedTests, failedTests, testErrors[], testFiles[] }
 - `totalTodosRemaining`：所有包的 TODO 残留总数
 - `unresolvedIssues`：未解决的问题列表
 
@@ -263,12 +255,13 @@ cd ${projectRoot} && mvn compile 2>&1
 ### 质量检查
 
 - [ ] mvn compile 执行完成（无论成功失败）
+- [ ] mvn test 执行完成（无论成功失败）
 - [ ] 每个包的 verify.json 已写入
 - [ ] 编译错误正确归因到具体包和文件
 - [ ] passed=true 时 mustFix 为空，passed=false 时 mustFix 非空
 - [ ] MyBatis XML 的 namespace 和 statement id 校验完成
-- [ ] 测试文件已生成且每个测试方法包含完整的 arrange→act→assert 逻辑（无空方法体）
-- [ ] 测试类命名以 Test 结尾，测试方法注释使用中文
+- [ ] 测试失败已正确归因到具体包和文件
+- [ ] verify-summary.json 包含 testExecution 完整结果（executed, totalTests, passedTests, failedTests, testErrors, testFiles）
 - [ ] 集合与异常（collection-exception）已审查：集合初始化大小、try-with-resources、禁止空 catch
 - [ ] verify-summary.json 的 compilation.success=false 时 errors 非空
 - [ ] 增量模式下未修改包的结果被正确合并到 summary

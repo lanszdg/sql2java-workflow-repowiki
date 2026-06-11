@@ -601,9 +601,13 @@ function extractVerifyData(data: PhaseBusinessData, dir: string): void {
   } catch { /* skip */ }
 
   try {
+    // 优先读 testExecution（新 schema），fallback testGeneration（旧 schema）
+    const te = json.testExecution as Record<string, unknown> | undefined
     const tg = json.testGeneration as Record<string, unknown> | undefined
-    if (tg) {
-      data.testFileCount = tg.generated ? safeArrayLen(tg.testFiles) : 0
+    if (te && te.executed) {
+      data.testFileCount = safeArrayLen(te.testFiles)
+    } else if (tg && tg.generated) {
+      data.testFileCount = safeArrayLen(tg.testFiles)
     }
   } catch { /* skip */ }
 }
