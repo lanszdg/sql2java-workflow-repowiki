@@ -346,6 +346,15 @@ function buildRuntimeContext(run: WorkflowRun): string {
   lines.push(`sourcePath: ${(run.metadata as Record<string, unknown>).sourcePath ?? "unknown"}`)
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
+  // projectRoot: scaffold 及后续阶段从 plan.json 的 targetProject.artifactId 推导
+  const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${run.runId}`, "plan")
+  if (planArtifact) {
+    const targetProject = planArtifact.targetProject as { artifactId: string } | undefined
+    if (targetProject?.artifactId) {
+      lines.push(`projectRoot: generated/${targetProject.artifactId}`)
+    }
+  }
+
   // 查找当前 entry（用于 incrementalContext 和 triggerPhase）
   const currentEntry = engine.findCurrentEntry(run)
 
@@ -405,6 +414,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 | \`upstreamArtifacts\` | 上游 artifact 路径列表 | 当前阶段需要读取的文件 |
 | \`incrementalContext\` | 增量模式上下文（可选） | fix 后增量处理时传入 targetPackages |
 | \`projectStructure\` | 自定义目录结构路径列表（可选） | scaffold 阶段使用自定义目录布局替代默认模板 |
+| \`projectRoot\` | Java 项目输出根目录（scaffold 及之后阶段，可选） | scaffold 写入 Java 文件到此目录，后续阶段从此目录读取 |
 
 ### Artifact 写入规则
 
@@ -585,6 +595,21 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       if (phase === "analyze") {
         const pkgError = validateAnalysisPackages(artifactsDir, parsed)
         if (pkgError) return pkgError
+      }
+
+      // scaffold 阶段：校验 projectRoot 必须为 generated/{artifactId} 格式
+      if (phase === "scaffold") {
+        const scaffoldData = parsed as { projectRoot: string }
+        const planForRoot = engine.loadArtifactJson(artifactsDir, "plan")
+        if (planForRoot) {
+          const artifactId = (planForRoot.targetProject as { artifactId: string })?.artifactId
+          if (artifactId) {
+            const expectedRoot = `generated/${artifactId}`
+            if (scaffoldData.projectRoot !== expectedRoot) {
+              return `scaffold.json projectRoot 必须是 "${expectedRoot}"，实际为 "${scaffoldData.projectRoot}"。请使用 Runtime Context 中注入的 projectRoot 值。`
+            }
+          }
+        }
       }
 
       // inventory 阶段：校验 inventory-packages/ + inventory-index.json
