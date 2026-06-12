@@ -9,8 +9,9 @@
  *   - 大输出截断
  *   - 依赖自动安装（node_modules 缺失时自动 npm/bun install）
  */
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, renameSync, unlinkSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, realpathSync } from "node:fs"
 import { join, dirname, resolve, sep } from "node:path"
+import { safeWriteFile } from "../workflow/cross-platform"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
@@ -1734,18 +1735,11 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
         }
 
-        // 确保父目录存在
-        mkdirSync(dirname(fullPath), { recursive: true })
-
-        // 原子写入：tmp → rename（与 engine-core persist() 保持一致）
-        const tmpPath = fullPath + ".tmp"
-        try {
-          writeFileSync(tmpPath, args.content, "utf-8")
-          renameSync(tmpPath, fullPath)
-        } catch (e: any) {
-          // 写入失败时清理临时文件
-          try { unlinkSync(tmpPath) } catch {}
-          return `❌ 写入失败: ${e.message}`
+        // 原子写入（safeWriteFile 内含 mkdir + tmp → rename + 清理）
+        let writeErr: Error | undefined
+        safeWriteFile(fullPath, args.content, (e) => { writeErr = e })
+        if (writeErr) {
+          return `❌ 写入失败: ${writeErr.message}`
         }
 
         const sizeKB = (args.content.length / 1024).toFixed(1)

@@ -15,8 +15,9 @@
  * - 配置文件使用 Oracle JDBC 连接描述符 XML 格式（db.xml）
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, renameSync, rmSync } from "node:fs"
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
+import { atomicRename, safeRm } from "./cross-platform"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, GENERATED_MARKER_ID } from "./constants"
 import { getLogger } from "./workflow-logger"
 
@@ -1062,7 +1063,7 @@ function generateDdlFiles(
     const entries = readdirSync(sourcePath, { withFileTypes: true })
     for (const entry of entries) {
       if (entry.name.startsWith(".schema-staging") && entry.isDirectory()) {
-        try { rmSync(join(sourcePath, entry.name), { recursive: true }) } catch { /* 文件锁定时忽略 */ }
+        try { safeRm(join(sourcePath, entry.name)) } catch { /* best-effort 清理：safeRm 已内置重试，此处仅兜底 genuine 失败 */ }
       }
     }
   } catch { /* sourcePath 不存在或不可读 */ }
@@ -1160,14 +1161,14 @@ function generateDdlFiles(
   const outputDir = join(sourcePath, GENERATED_OUTPUT_DIR)
   if (existsSync(outputDir)) {
     try {
-      rmSync(outputDir, { recursive: true })
+      safeRm(outputDir)
     } catch (rmErr: any) {
       throw new Error(`无法清理旧的 ${GENERATED_OUTPUT_DIR} 目录: ${rmErr.message}`)
     }
   }
 
   try {
-    renameSync(stagingDir, outputDir)
+    atomicRename(stagingDir, outputDir)
   } catch (commitErr: any) {
     throw new Error(
       `DDL 文件提交失败（staging 目录仍保留: ${stagingDir}）: ${commitErr.message}`,
@@ -1206,7 +1207,7 @@ export function cleanupGeneratedDdl(sourcePath: string): void {
   const ddlOutput = join(sourcePath, GENERATED_OUTPUT_DIR)
   const markerPath = join(ddlOutput, GENERATED_MARKER)
   if (existsSync(markerPath) && isOurGeneratedMarker(markerPath)) {
-    try { rmSync(ddlOutput, { recursive: true }) } catch { /* ignore */ }
+    try { safeRm(ddlOutput) } catch { /* ignore */ }
   }
 }
 

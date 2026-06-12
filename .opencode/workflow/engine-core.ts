@@ -16,8 +16,9 @@
  *   D12: FixArtifact 包名校验
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync, renameSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs"
+import { safeWriteFile } from "./cross-platform"
+import { join } from "node:path"
 import { z } from "zod"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -1046,13 +1047,8 @@ export class WorkflowEngine {
   /** D6: 持久化 run.json（原子写入：tmp → rename） */
   private persist(run: WorkflowRun): void {
     const dir = join(this.artifactsRoot, run.runId)
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true })
-    }
     const filePath = join(dir, "run.json")
-    const tmpPath = filePath + ".tmp"
-    writeFileSync(tmpPath, JSON.stringify(run, null, 2), "utf-8")
-    renameSync(tmpPath, filePath)
+    safeWriteFile(filePath, JSON.stringify(run, null, 2))
   }
 
   /** 追加事件日志 */
@@ -1064,6 +1060,6 @@ export class WorkflowEngine {
     const logPath = join(dir, "_events.log")
     const now = new Date().toISOString()
     const line = `[${now}] [${eventType}] [${runId}] [${phase}] ${message}\n`
-    appendFileSync(logPath, line, "utf-8")
+    try { appendFileSync(logPath, line, "utf-8") } catch (e: any) { /* 日志写入失败不阻塞主流程 */ if (typeof process !== "undefined" && process.stderr) process.stderr.write(`[engine-core] appendEvent failed: ${e.message}\n`) }
   }
 }

@@ -13,10 +13,11 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync,
-  readdirSync, renameSync, statSync, unlinkSync,
+  readFileSync, existsSync, mkdirSync,
+  readdirSync, statSync,
 } from "node:fs"
 import { join } from "node:path"
+import { safeWriteFile } from "./cross-platform"
 import type { PhaseHistoryEntry, WorkflowRun } from "./engine-core"
 import { getLogger } from "./workflow-logger"
 
@@ -362,21 +363,15 @@ class PhaseMetricsCollector {
     }
   }
 
-  /** 原子写入 metrics JSON（沿用 engine-core 的 tmp → rename 模式） */
+  /** 原子写入 metrics JSON（使用 safeWriteFile 统一错误处理） */
   persist(): void {
     const filename = this.metrics.fixIndex != null
       ? `fix-${this.metrics.fixIndex}.json`
       : `${this.metrics.phase}.json`
     const filePath = join(this.metricsDir, filename)
-    const tmpPath = filePath + ".tmp"
-    try {
-      writeFileSync(tmpPath, JSON.stringify(this.metrics, null, 2), "utf-8")
-      renameSync(tmpPath, filePath)
-    } catch (e) {
-      getLogger().warn("[metrics]", `persist 失败: ${(e as Error).message}`)
-      // 清理孤立 .tmp 文件
-      try { if (existsSync(tmpPath)) { unlinkSync(tmpPath) } } catch { /* 忽略清理失败 */ }
-    }
+    safeWriteFile(filePath, JSON.stringify(this.metrics, null, 2), (e) => {
+      getLogger().warn("[metrics]", `persist 失败: ${e.message}`)
+    })
   }
 
   /**
