@@ -20,6 +20,7 @@ import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdi
 import { safeWriteFile } from "./cross-platform"
 import { join } from "node:path"
 import { z } from "zod"
+import { validRefNameSet, parseQualified } from "./refname"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -563,6 +564,9 @@ export class WorkflowEngine {
 
   validateCrossSchema(run: WorkflowRun, completedPhase: string): string[] {
     const warnings: string[] = []
+    // 整体 try/catch：校验对象是 LLM 产出的 raw JSON（未经 schema），结构异常时降级为 warning，
+    // 绝不抛出——保住"validateCrossSchema 只发 warning、不阻塞 advance"的设计契约。
+    try {
     const artifactsDir = join(this.artifactsRoot, run.runId)
 
     const inventory = this.loadArtifactJson(artifactsDir, "inventory")
@@ -597,6 +601,37 @@ export class WorkflowEngine {
       if (!orderedUpper.has(name.toUpperCase())) warnings.push(`translationOrder 缺少包: ${name}`)
     }
 
+    // callGraph refName 一致性校验（仅 analyze 完成后；防"裸名撞重载"缺陷）
+    // analysis.json.callGraph 的 key/value 须为 PKG.refName，refName 须落在该包 inventory-packages
+    // 推导出的合法集合内（非重载=裸名，重载={name}__序号，全部带序号）。
+    if (completedPhase === "analyze") {
+      const callGraph = (analysis.callGraph as Record<string, string[]>) ?? {}
+      const refNameByPkg = this.buildRefNameIndex(artifactsDir, anaNames)
+      const refs: Array<[string, "key" | "value"]> = []
+      for (const [k, vs] of Object.entries(callGraph)) {
+        refs.push([k, "key"])
+        if (Array.isArray(vs)) {
+          for (const v of vs) refs.push([v, "value"])
+        } else {
+          warnings.push(`callGraph["${k}"] 的值应为字符串数组，实际为 ${vs === null ? "null" : typeof vs}，已跳过该调用边`)
+        }
+      }
+      for (const [qualified, kind] of refs) {
+        const parsed = parseQualified(qualified)
+        if (!parsed) {
+          warnings.push(`callGraph ${kind} 非法的限定名格式（应为 PKG.refName）: ${qualified}`)
+          continue
+        }
+        const [pkg, ref] = parsed
+        const valid = refNameByPkg.get(pkg.toUpperCase())
+        if (valid && !valid.has(ref.toUpperCase())) {
+          warnings.push(
+            `callGraph ${kind} 的 refName "${ref}" 不在 ${pkg} 的合法 refName 集合内（重载子程序应为 {name}__序号，禁用裸名）: ${qualified}`,
+          )
+        }
+      }
+    }
+
     // plan 映射覆盖（仅 plan 完成后校验）
     if (completedPhase === "plan") {
       const plan = this.loadArtifactJson(artifactsDir, "plan")
@@ -609,6 +644,37 @@ export class WorkflowEngine {
       )
       for (const name of invNames) {
         if (!mappedNames.has(name)) warnings.push(`plan 未映射包: ${name}`)
+      }
+    }
+
+    // translation.json.subprogramMethods refName + 唯一性校验
+    // oracleName 须唯一、且落在该包合法 refName 集合内（重载带 {name}__序号）。
+    // translate 完成时所有包 translation.json 已齐 → 即时校验给 translator 反馈；dedup 再校验一次（幂等）。
+    if (completedPhase === "translate" || completedPhase === "dedup") {
+      const refNameByPkg = this.buildRefNameIndex(artifactsDir, anaNames)
+      for (const pkg of anaNames) {
+        const trans = this.loadArtifactJson(artifactsDir, pkg) // → translations/{pkg}/translation.json
+        if (!trans) {
+          warnings.push(`${pkg}: translation.json 未找到（translations/${pkg}/translation.json 路径或大小写不匹配），跳过 subprogramMethods 校验`)
+          continue
+        }
+        const valid = refNameByPkg.get(pkg.toUpperCase())
+        const methods = Array.isArray(trans.subprogramMethods) ? (trans.subprogramMethods as Array<{ oracleName: string }>) : []
+        const seen = new Set<string>()
+        for (const m of methods) {
+          const key = (m.oracleName ?? "").toUpperCase()
+          if (!key) {
+            warnings.push(`${pkg}: subprogramMethods 存在空 oracleName`)
+            continue
+          }
+          if (seen.has(key)) warnings.push(`${pkg}: subprogramMethods 重复 oracleName: ${m.oracleName}`)
+          seen.add(key)
+          if (valid && !valid.has(key)) {
+            warnings.push(
+              `${pkg}: subprogramMethods.oracleName "${m.oracleName}" 不在合法 refName 集合内（重载子程序应为 {name}__序号）`,
+            )
+          }
+        }
       }
     }
 
@@ -632,7 +698,9 @@ export class WorkflowEngine {
       ).map((c) => c.packageName)
       this.validatePackageRefs(changePkgs, invNames, "dedup: packageChanges", warnings)
     }
-
+    } catch (e) {
+      warnings.push(`跨 Schema 校验内部异常（已降级为 warning，不阻塞流程）: ${e instanceof Error ? e.message : String(e)}`)
+    }
     return warnings
   }
 
@@ -757,6 +825,25 @@ export class WorkflowEngine {
     if (invalid.length > 0) {
       warnings.push(`${label} 引用了不存在的包: ${[...new Set(invalid)].join(", ")}`)
     }
+  }
+
+  /**
+   * 构建各包（包名大写）→ 合法 refName 集合（大写）的索引，供 callGraph / subprogramMethods
+   * 一致性校验复用。refName 推导依据 inventory-packages/{PKG}.json 的 procedures 数组顺序与重复次数。
+   */
+  private buildRefNameIndex(
+    artifactsDir: string,
+    packageNames: Iterable<string>,
+  ): Map<string, Set<string>> {
+    const index = new Map<string, Set<string>>()
+    for (const pkg of packageNames) {
+      const invPkg = this.loadArtifactJson(artifactsDir, `inventory-packages/${pkg}`)
+      const procs = ((invPkg?.procedures as Array<{ name: string }>) ?? []).map((p) => p.name)
+      // 空包 / 缺失 inventory-packages 文件也建索引（validRefNameSet([]) → 空 Set）：该包的任何
+      // refName 引用都会被判非法并告警，而非因 valid 为 undefined 被 `if (valid && ...)` 静默跳过。
+      index.set(pkg.toUpperCase(), validRefNameSet(procs))
+    }
+    return index
   }
 
   /** 匹配 TransitionRule (D1: 根据 result 匹配 condition) */

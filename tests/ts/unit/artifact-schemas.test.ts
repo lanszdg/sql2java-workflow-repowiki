@@ -26,8 +26,8 @@ import {
   getAnalysisPackageSchema,
 } from "@workflow/artifact-schemas"
 import {
-  makeInventoryIndex, makeInventory, makeAnalysisMeta,
-  makePlan, makeScaffold, makeTranslation,
+  makeInventoryIndex, makeInventory, makeInventoryPackage, makeAnalysisMeta,
+  makePlan, makeScaffold, makeAnalysisPackage, makeTranslation,
   makeReviewSummary, makeVerifySummary, makeDedup, makeFixArtifact,
 } from "../helpers/artifact-factory"
 
@@ -147,6 +147,48 @@ describe("Schema 有效数据通过校验", () => {
     expect(TranslationSchema.safeParse(data).success).toBe(true)
   })
 
+  it("TranslationSchema 含 subprogramMethods 通过", () => {
+    const data = {
+      packageName: "CORE_PKG",
+      status: "completed",
+      completedSubprograms: ["GET_ITEM"],
+      totalSubprograms: 1,
+      files: [{ path: "service/ItemService.java", role: "service-impl" }],
+      decisions: [],
+      todos: [],
+      subprogramMethods: [
+        { oracleName: "get_item", javaClass: "com.example.item.ItemService", javaMethod: "getItem", javaFile: "service/ItemService.java" },
+      ],
+    }
+    expect(TranslationSchema.safeParse(data).success).toBe(true)
+  })
+
+  it("TranslationSchema 重载子程序 refName 唯一（__序号区分，重复 oracleName 被拒）", () => {
+    const data = {
+      packageName: "CORE_PKG",
+      status: "completed",
+      completedSubprograms: ["get_param__1", "get_param__2"],
+      totalSubprograms: 2,
+      files: [],
+      decisions: [],
+      todos: [],
+      subprogramMethods: [
+        { oracleName: "get_param__1", javaClass: "com.example.item.ItemService", javaMethod: "getParamById" },
+        { oracleName: "get_param__2", javaClass: "com.example.item.ItemService", javaMethod: "getParamByName" },
+      ],
+    }
+    // 合法：两个不同 refName → 通过
+    expect(TranslationSchema.safeParse(data).success).toBe(true)
+
+    // 非法：重复 oracleName（裸名撞重载的典型错误）→ 被拒
+    const dup = { ...data, subprogramMethods: [
+      { oracleName: "get_param", javaClass: "X", javaMethod: "a" },
+      { oracleName: "get_param", javaClass: "X", javaMethod: "b" },
+    ] }
+    const parsed = TranslationSchema.safeParse(dup)
+    expect(parsed.success).toBe(false)
+  })
+
   it("ReviewSchema 通过 (passed=true, mustFix=[])", () => {
     const data = {
       packageName: "CORE_PKG",
@@ -231,6 +273,28 @@ describe("Schema 有效数据通过校验", () => {
 
   it("FixArtifactSchema 通过", () => {
     expect(FixArtifactSchema.safeParse(makeFixArtifact()).success).toBe(true)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// 工厂默认产出符合 Schema（防止工厂与 schema 漂移，P9）
+// ═══════════════════════════════════════════════════════════════
+
+describe("工厂默认产出符合 Schema", () => {
+  it("makeScaffold 默认值通过 ScaffoldSchema", () => {
+    expect(ScaffoldSchema.safeParse(makeScaffold()).success).toBe(true)
+  })
+  it("makeAnalysisMeta 默认值通过 AnalysisMetaSchema", () => {
+    expect(AnalysisMetaSchema.safeParse(makeAnalysisMeta()).success).toBe(true)
+  })
+  it("makeTranslation 默认值通过 TranslationSchema", () => {
+    expect(TranslationSchema.safeParse(makeTranslation()).success).toBe(true)
+  })
+  it("makeInventoryPackage 默认值通过 InventoryPackageSchema", () => {
+    expect(InventoryPackageSchema.safeParse(makeInventoryPackage()).success).toBe(true)
+  })
+  it("makeAnalysisPackage 默认值通过 AnalysisPackageSchema", () => {
+    expect(AnalysisPackageSchema.safeParse(makeAnalysisPackage()).success).toBe(true)
   })
 })
 

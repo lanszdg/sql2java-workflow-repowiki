@@ -5,7 +5,8 @@
  * 为 AI agent 提示词中的跨平台文件操作提供简短子命令，
  * 替代冗长的 `node -e "..."` 单行命令。
  *
- * 使用 Bun 运行时（纯 CJS + node: 内置模块，零外部依赖）。
+ * 使用 Bun 运行时（CJS + node: 内置模块）；refName 命名规范复用同目录
+ * refname.ts（bun 运行时直解 TS，单一真相源，避免内联副本漂移）。
  *
  * 用法：bun .opencode/workflow/wf-util.js <subcommand> [options] [args]
  *
@@ -26,6 +27,7 @@
 
 const fs = require("node:fs")
 const path = require("node:path")
+const { validRefNameSet } = require("./refname")
 
 // ── 帮助 ──────────────────────────────────────────────────────────────────────
 
@@ -173,22 +175,38 @@ function cmdValidateFsd(args) {
   const invFiles = fs.readdirSync(invDir).filter(function (n) { return n.endsWith(".json") })
   for (const fn of invFiles) {
     const pkg = fn.replace(/\.json$/, "")
-    var invCount = 0
+    var procNames = []
     try {
       var data = JSON.parse(fs.readFileSync(path.join(invDir, fn), "utf-8"))
-      invCount = (data.procedures || []).length
+      procNames = (data.procedures || []).map(function (p) { return p.name })
     } catch (e) {
       die("failed to parse " + fn + ": " + e.message)
     }
+    var invCount = procNames.length
 
-    var fsdCount = 0
+    // 合法 refName 集合（大写 Set，大小写不敏感比对）；复用 refname.ts 的 validRefNameSet
+    var expectedUpper = validRefNameSet(procNames)
+
     var pkgFsdDir = path.join(fsdDir, pkg)
+    var actualFiles = []  // [{name, upper}]
     if (fs.existsSync(pkgFsdDir)) {
-      fsdCount = fs.readdirSync(pkgFsdDir).filter(function (n) { return n.endsWith(".md") }).length
+      fs.readdirSync(pkgFsdDir)
+        .filter(function (n) { return n.endsWith(".md") })
+        .forEach(function (n) { actualFiles.push({ name: n, upper: n.replace(/\.md$/i, "").toUpperCase() }) })
     }
+    var fsdCount = actualFiles.length
 
-    if (invCount !== fsdCount) {
-      console.log("❌ MISSING: " + pkg + " inventory=" + invCount + " fsd=" + fsdCount)
+    // 命名校验：孤儿（文件名不在合法 refName 集合，如旧格式 get_param.md）/ 缺失（应有却无）
+    var orphans = actualFiles.filter(function (a) { return !expectedUpper.has(a.upper) })
+    var actualUpperSet = {}
+    actualFiles.forEach(function (a) { actualUpperSet[a.upper] = true })
+    var missing = Array.from(expectedUpper).filter(function (r) { return !actualUpperSet[r] })
+
+    if (invCount !== fsdCount || orphans.length > 0 || missing.length > 0) {
+      var parts = [pkg + " inventory=" + invCount + " fsd=" + fsdCount]
+      if (orphans.length > 0) parts.push("孤儿/命名错误: " + orphans.map(function (a) { return a.name }).join(", "))
+      if (missing.length > 0) parts.push("缺失: " + missing.map(function (r) { return r + ".md" }).join(", "))
+      console.log("❌ MISSING: " + parts.join(" | "))
     } else {
       console.log("✅ " + pkg + ": " + fsdCount + " FSD files")
     }

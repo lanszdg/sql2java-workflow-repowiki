@@ -217,6 +217,11 @@ const SubprogramSchema = z.object({
 
 /** analysis.json — 全局元数据（不含逐包子程序数据） */
 export const AnalysisMetaSchema = z.object({
+  /**
+   * 调用图：key = 限定名 `PKG.refName`，value = 被调用的 `PKG.refName` 数组（与 key 同规范）。
+   * refName 规范：非重载子程序=Oracle 原始名；重载子程序=`{name}__{序号}`（1-based，全部带序号），
+   * 与 FSD 文件名、translation.json.subprogramMethods.oracleName 一致（修现行裸名撞重载的缺陷）。
+   */
   callGraph: z.record(z.string(), z.array(z.string())),
   packageDependency: z.record(z.string(), z.array(z.string())),
   translationOrder: z.array(z.array(z.string())),
@@ -370,6 +375,30 @@ export const TranslationSchema = z.object({
     oracleLine: z.number(),
     suggestion: z.string(),
   })),
+
+  /**
+   * 本包子程序 → Java 调用入口索引，供「依赖本包的后续翻译包」对接跨包调用。
+   *
+   * translate 按拓扑序逐包翻译：后翻译的包 A 调用本包子程序 y 时，read 本文件、在此按
+   * oracleName 查到 y 的真实 javaClass/javaMethod，避免靠 FSD 预估或命名猜测。
+   *
+   * - oracleName：唯一引用名（refName）。非重载=Oracle 原始名；重载=`{name}__{序号}`（1-based，全部带序号），
+   *   与 callGraph key 的 refName、FSD 文件名一致。**唯一性由 refine 强制**（大小写不敏感去重），
+   *   避免重载裸名重复导致跨包查找歧义。
+   * - javaClass：调用入口的**全限定名**，即对外暴露的 Service 接口（调用方经 Spring DI 注入它），
+   *   如 "com.example.util.BService"。全限定以便调用方直接 import，无需再查 plan。
+   * - javaMethod：Java 方法名（Service 接口上的方法名）。
+   * - javaFile：Service 接口文件相对路径（可选，便于定位）。
+   */
+  subprogramMethods: z.array(z.object({
+    oracleName: z.string(),
+    javaClass: z.string(),
+    javaMethod: z.string(),
+    javaFile: z.string().optional(),
+  })).refine(
+    (methods) => new Set(methods.map((m) => m.oracleName.toUpperCase())).size === methods.length,
+    { message: "subprogramMethods.oracleName 必须唯一（重载子程序用 {name}__序号 区分，禁用裸名重复）" },
+  ).default([]),
 })
 
 // ============================================================================

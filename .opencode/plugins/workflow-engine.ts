@@ -1107,7 +1107,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const banner = formatPhaseStartBanner(run.currentPhase)
             return {
               title: "Started",
-              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}${banner}`,
+              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}${banner}\n📌 立即调用 todowrite 创建主线阶段进度（${run.currentPhase}=in_progress，其余=pending）`,
               metadata: { runId, phase: run.currentPhase, scanStatus },
             }
           }
@@ -1276,7 +1276,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const startBanner = formatPhaseStartBanner(adv.run.currentPhase)
             return {
               title: `→ ${adv.run.currentPhase}`,
-              output: `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}`,
+              output: `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}\n\n📌 调用 todowrite 更新进度：${completedPhase}→completed，${adv.run.currentPhase}→in_progress`,
               metadata: { runId, phase: adv.run.currentPhase, reportPath: phaseReportText ? join(ARTIFACT_DIR, runId, "reports", `${completedPhase || "unknown"}-report.txt`) : undefined },
             }
           }

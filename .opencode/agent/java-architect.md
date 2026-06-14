@@ -83,7 +83,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 - **分析数据**：`${artifactsDir}/analysis.json` — 依赖图、拓扑排序、复杂度
 - **子程序结构**：`${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（按需读取）
 - **FSD 文档**：`${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
-  - **重载子程序**的 FSD 文件名格式为 `{name}__{序号}.md`（如 `get_param.md`、`get_param__2.md`），对应同一子程序名但不同参数签名的多个版本。推导子程序列表时需将 `__{序号}` 后缀剥离还原为原始子程序名
+  - **重载子程序**的 FSD 文件名格式为 `{name}__{序号}.md`（**全部**带序号，如 `get_param__1.md`、`get_param__2.md`），对应同一子程序名但不同参数签名的多个版本；非重载子程序为 `{name}.md`。序号 = 该同名子程序在 `inventory-packages/{PKG}.json` 的 `procedures` 数组中的第几次出现（1-based）。推导子程序列表时需将 `__{序号}` 后缀剥离还原为原始子程序名
 - **源码文件**：必要时可读取源码确认细节
 
 ### 输出

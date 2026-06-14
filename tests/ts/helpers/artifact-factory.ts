@@ -70,11 +70,15 @@ export function makeInventory(overrides: Record<string, unknown> = {}) {
 
 // ── Analysis Meta ────────────────────────────────────────────
 
+/** analysis.json — 全局元数据（callGraph key 用 PKG.refName） */
 export function makeAnalysisMeta(overrides: Record<string, unknown> = {}) {
   return {
-    sourcePath: "/test/source",
-    totalPackages: 1,
-    packageAnalysisPaths: ["analysis-packages/CORE_PKG.json"],
+    callGraph: { "CORE_PKG.GET_ITEM": [], "CORE_PKG.SET_ITEM": [] },
+    packageDependency: { CORE_PKG: [] },
+    translationOrder: [["CORE_PKG"]],
+    complexity: { CORE_PKG: { score: 3, patterns: [], riskLevel: "low" as const } },
+    sccGroups: [],
+    packageNames: ["CORE_PKG"],
     ...overrides,
   }
 }
@@ -114,35 +118,82 @@ export function makePlan(overrides: Record<string, unknown> = {}) {
 
 // ── Scaffold ─────────────────────────────────────────────────
 
+/** scaffold.json — 对齐 ScaffoldSchema */
 export function makeScaffold(overrides: Record<string, unknown> = {}) {
   return {
     projectRoot: "generated/item-service",
-    packageBase: "com.example.item",
-    pomXml: true,
-    applicationYml: true,
-    directoryStructure: "src/main/java/com/example/item",
-    commonModules: {
-      classes: [
-        { name: "AppException", category: "exception", path: "exception/AppException.java" },
-      ],
+    structure: {
+      directories: ["src/main/java/com/example/item"],
+      pomXml: "pom.xml",
     },
+    generated: {
+      entities: [],
+      mapperInterfaces: [{ file: "src/main/java/com/example/item/mapper/ItemMapper.java", oraclePackage: "CORE_PKG" }],
+      serviceShells: [{ file: "src/main/java/com/example/item/service/impl/ItemServiceImpl.java", oraclePackage: "CORE_PKG" }],
+      commonClasses: [],
+    },
+    conventions: "Standard conventions",
+    ...overrides,
+  }
+}
+
+// ── Inventory Package（逐包）─────────────────────────────────
+
+/** inventory-packages/{PKG}.json — 对齐 InventoryPackageSchema */
+export function makeInventoryPackage(overrides: Record<string, unknown> = {}) {
+  return {
+    packageName: "CORE_PKG",
+    specFile: "pkg/core_pkg.pks",
+    bodyFile: "pkg/core_pkg.pkb",
+    procedures: [
+      {
+        name: "GET_ITEM",
+        type: "function" as const,
+        params: [{ name: "P_ID", oracleType: "NUMBER", direction: "IN" as const }],
+        lineRange: [10, 50] as [number, number],
+        loc: 40,
+      },
+    ],
+    types: [],
+    variables: [],
+    constants: [],
+    ...overrides,
+  }
+}
+
+// ── Analysis Package（逐包）──────────────────────────────────
+
+/** analysis-packages/{PKG}.json — 对齐 AnalysisPackageSchema */
+export function makeAnalysisPackage(overrides: Record<string, unknown> = {}) {
+  return {
+    packageName: "CORE_PKG",
+    subprograms: [
+      {
+        name: "GET_ITEM",
+        blocks: [{ type: "sql-statement" as const, oracleLine: 12, description: "SELECT INTO 查询", dependencies: [] }],
+        variables: [],
+        cursors: [],
+        exceptionHandlers: [],
+        translationNotes: "按 id 查询",
+      },
+    ],
     ...overrides,
   }
 }
 
 // ── Translation (per package) ────────────────────────────────
 
+/** translations/{PKG}/translation.json — 对齐 TranslationSchema（含 subprogramMethods） */
 export function makeTranslation(overrides: Record<string, unknown> = {}) {
   return {
-    package: "CORE_PKG",
-    javaFiles: [
-      { path: "service/ItemService.java", description: "Service implementation" },
-      { path: "mapper/ItemMapper.java", description: "Mapper interface" },
-      { path: "mapper/ItemMapper.xml", description: "MyBatis XML mapper" },
-    ],
-    procedures: [
-      { oracleName: "GET_ITEM", javaMethod: "getItem", status: "translated" as const },
-    ],
+    packageName: "CORE_PKG",
+    status: "completed" as const,
+    completedSubprograms: ["GET_ITEM"],
+    totalSubprograms: 1,
+    files: [{ path: "service/ItemService.java", role: "service-impl" }],
+    decisions: [],
+    todos: [],
+    subprogramMethods: [],
     ...overrides,
   }
 }

@@ -62,7 +62,8 @@ describe("SQL2JAVA_WORKFLOW phases", () => {
 
   it("needsCrossSchemaValidation 的阶段正确", () => {
     const crossSchemaPhases = phases.filter(p => p.needsCrossSchemaValidation).map(p => p.name)
-    expect(crossSchemaPhases.sort()).toEqual(["analyze", "dedup", "plan"])
+    // translate 完成时所有包 translation.json 已齐，即时校验 subprogramMethods 给 translator 反馈
+    expect(crossSchemaPhases.sort()).toEqual(["analyze", "dedup", "plan", "translate"])
   })
 })
 

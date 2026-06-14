@@ -103,7 +103,8 @@ permission:
   - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（逐包读取）
   - `${artifactsDir}/scaffold.json` — 已生成的项目骨架
   - `${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
-    - **重载子程序**的 FSD 文件名格式为 `{name}__{序号}.md`（如 `get_param.md`、`get_param__2.md`），对应同一子程序名但不同参数签名的多个版本
+    - **重载子程序**的 FSD 文件名格式为 `{name}__{序号}.md`（全部带序号，如 `get_param__1.md`、`get_param__2.md`），对应同一子程序名但不同参数签名的多个版本；非重载为 `{name}.md`
+  - **已翻译依赖包的 `translations/{pkg}/translation.json`**：按拓扑序翻译时被依赖的包已先翻译，其 `subprogramMethods` 提供「子程序 → 真实 Java 方法名」映射，用于跨包调用对接（见 Step 2）；用 `read` 主动读取
 - **源码文件**：原始 PL/SQL 文件
 
 ### 输出
@@ -129,6 +130,12 @@ permission:
    - 参考子程序的 blocks、variables、cursors、exceptionHandlers
    - 参考翻译注意事项 translationNotes
    - 可选参考 FSD 文档（注意：`__{序号}.md` 后缀的是重载子程序，对应同一子程序的不同参数版本）
+   - **对接跨包调用**：跨包调用边取自结构化的 `analysis.json.callGraph`（key/value 均为 `PKG.refName`），**不解析 FSD 板块 3 的 markdown**——板块 3 仅为人类可读文档，调用关系以 callGraph 为准。处理子程序 s 的跨包调用：
+     - 查 `callGraph["{本包}.{s 的 refName}"]` 得其调用的 `[PKG.refName, ...]` 列表（拓扑序保证被依赖包先翻译，其 translation.json 此刻已存在）
+     - 对每个跨包目标 `目标包.目标refName`：在被依赖包 `translations/{目标包}/translation.json` 的 `subprogramMethods` 按 `oracleName` 查真实 `javaClass`（Service 接口**全限定名**）和 `javaMethod`
+     - **同一被依赖包的 translation.json 本包只 read 一次**（读后缓存其 subprogramMethods 映射供后续子程序复用），避免逐子程序重复 read
+     - 用真实全限定名 import + 注入 + 调用（如 `import com.example.util.BService;` 注入后 `bService.findY(...)`），**不靠命名约定猜测**
+     - 若依赖包未翻译（仅 SCC 组内可能）或 `subprogramMethods` 缺失：标 `// TODO: [translate] 跨包调用 {目标包}.{目标refName} 待对接`，由 review/fix 兜底
    - 按五原则翻译为 Java 代码
 3. **生成文件**：
    - Mapper 接口（`@Mapper`，包含所有子程序对应的 SQL 方法）
@@ -162,6 +169,7 @@ translation.json 包含：
 - `files`：生成的 Java 文件列表（path + role，包含生产代码和测试文件）
 - `decisions`：翻译决策记录（line, oracleConstruct, javaConstruct, reason, confidence）
 - `todos`：TODO 标记（file, issue, oracleLine, suggestion）
+- `subprogramMethods`：本包每个子程序 → Java 调用入口索引，供「依赖本包的后续翻译包」对接跨包调用。每项 `{ oracleName=refName, javaClass=Service 接口全限定名(如 com.example.util.BService), javaMethod, javaFile?=接口文件路径 }`；重载子程序 oracleName 用 `{name}__{序号}` 区分（与 refName 一致）
 
 ### 中断恢复
 
@@ -178,6 +186,8 @@ translation.json 包含：
 - [ ] OUT/IN OUT 参数通过 DTO 传递
 - [ ] 不确定的构造标记了 `// TODO: [translate] 标记人 标记时间 中文说明`
 - [ ] translation.json 记录了所有翻译决策和 TODO
+- [ ] 跨包调用用了真实方法名（读依赖包 `translations/{pkg}/translation.json` 的 `subprogramMethods`），非命名猜测；SCC 组内未对接的已标 TODO
+- [ ] translation.json 的 `subprogramMethods` 覆盖本包所有子程序：`oracleName` 用 refName（重载带 `__序号`）、`javaClass` 用 Service 接口全限定名
 - [ ] Java 代码规约已全面遵守（命名、格式、注释语言、OOP、集合与异常等，详见注入的规约文档）
 - [ ] 每个 ServiceImpl 方法都有对应的测试方法（含完整 arrange→act→assert 逻辑）
 - [ ] 测试文件在 translation.json 的 files 数组中标记为 role `"test"`

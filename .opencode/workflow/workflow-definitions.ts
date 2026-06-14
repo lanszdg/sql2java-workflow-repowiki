@@ -54,6 +54,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
+      needsCrossSchemaValidation: true,
       tools: ["read", "bash", "write", "edit", "workflow"],
     },
     {

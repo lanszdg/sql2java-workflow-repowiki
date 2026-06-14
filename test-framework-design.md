@@ -2,7 +2,7 @@
 
 > 状态：待审核 · 2026-06-13
 > 范围：定义如何对 `.opencode` 目录下的工作流（代码、运行机制、agent、规约）进行系统化测试
-> 关联：本方案与 `.opencode/docs/todo-tracking-design.md` 体例一致
+> 关联：本方案与 `todo-tracking-design.md` 体例一致
 
 ---
 

@@ -302,7 +302,9 @@ bun .opencode/workflow/wf-util.js grep-calls ${sourcePath}/pkg
 
 基于 grep 结果构建：
 
-1. **调用图（callGraph）**：key 为限定名（`PKG_NAME.PROC_NAME`），值为被调用的限定名数组
+1. **调用图（callGraph）**：key 为限定名 `PKG_NAME.refName`，value 为被调用的 `PKG_NAME.refName` 数组（与 key 同规范）
+
+   **refName 规范**（所有跨处引用子程序统一使用）：非重载子程序（同名仅 1 次）= Oracle 原始名；重载子程序（同名多版本）的序号 = 该同名子程序在 `inventory-packages/{PKG}.json` 的 `procedures` 数组中的**第几次出现**（1-based），**全部**重载版本用 `{name}__{序号}`（如 `get_param__1`、`get_param__2`），避免裸名撞重载。refName 同时用于：callGraph 的 key 与 value、FSD 文件名、FSD 板块 3 目标子程序、`translation.json.subprogramMethods.oracleName`。
 2. **包级依赖（packageDependency）**：从 callGraph 推导
 3. **拓扑排序 + SCC 检测**：
    - SCC 循环依赖组归为同层数组（如 `["order_proc", "order_util"]`）
@@ -367,7 +369,7 @@ bun .opencode/workflow/wf-util.js grep-calls ${sourcePath}/pkg
 
 1. **概览**：表格（子程序名 / 类型 / 功能摘要 / 翻译策略）+ 签名代码块 + 参数清单表格（参数名 | 方向 | Oracle 类型 | Java 类型 | 说明）
 2. **表结构映射**：表格（表名 | 操作 | 关键条件 | 说明）+ 关键列要点。纯逻辑函数写"不涉及表操作"即可
-3. **依赖分析**：表格（调用目标 | 功能 | Java 映射 | 状态）+ 序列/常量依赖。无依赖写"无"即可
+3. **依赖分析**：表格（`目标包` | `目标子程序 (refName)` | `功能`）+ 序列/常量依赖。无依赖写"无"即可。**只记客观调用关系**（目标包 + 目标子程序），**不预估 Java 映射** —— 具体 Java 方法名由 translate 阶段读目标包 `translation.json` 的 `subprogramMethods` 决定，FSD 写预估会与实际翻译不符、误导 translator。**此表为人类可读文档**；translator 的跨包调用边以 `analysis.json.callGraph`（结构化）为准，不解析本表。
 4. **业务规则**：编号列表或表格列出校验规则、计算逻辑、边界条件。简单子程序可合并为一段
 5. **控制流与异常**：简单子程序用文字描述；复杂子程序（>3 个分支或含循环）用 Mermaid 流程图 + 异常路径表格
 6. **特殊语法转化规约**：转化映射表格（Oracle 构造 | 位置 | Java/MyBatis 等价 | 风险）+ 事务边界 + "需手动审查的构造"表格（列：构造 | 位置 | 原因 | 建议）。全部安全时最后一表写"（无）"
@@ -413,7 +415,7 @@ bun .opencode/workflow/wf-util.js grep-calls ${sourcePath}/pkg
 - 路径：`${artifactsDir}/fsd/{package}/{subprogram}.md`
 - 包名使用 inventory 中的 Oracle 包名（如 `PROCUREMENT_PKG`）
 - 子程序名使用小写 snake_case（如 `create_po`）
-- **重载子程序**（同名不同参数）：按在 inventory-packages/{PKG}.json 中出现的顺序，第一个用 `{name}.md`，后续用 `{name}__{序号}.md`（如 `get_param.md`、`get_param__2.md`、`get_param__3.md`）
+- **重载子程序**（同名不同参数）：按在 inventory-packages/{PKG}.json 中出现的顺序，**全部**用 `{name}__{序号}.md`（1-based，如 `get_param__1.md`、`get_param__2.md`），与 refName 一致；非重载子程序用 `{name}.md`
 
 每完成一个子程序的 FSD，**立即**用 `write` 工具写入。禁止攒多个子程序再批量写入。
 
@@ -473,7 +475,7 @@ workflow({ action: "advance", runId: "${runId}", result: "passed" })
 
 ### 质量检查
 
-- [ ] callGraph 中所有 key 使用限定名格式（`PKG.PROC`）
+- [ ] callGraph 中所有 key 使用限定名格式（`PKG.refName`），重载子程序带 `__序号`
 - [ ] translationOrder 覆盖 inventory 中所有包
 - [ ] SCC 组在 translationOrder 中为同层数组
 - [ ] 每个子程序都有 blocks 解析（至少一个语句块）
