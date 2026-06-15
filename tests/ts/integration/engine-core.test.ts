@@ -15,7 +15,7 @@ import { makeReviewSummary, makeVerifySummary, makeFixArtifact } from "../helper
 
 // ── 辅助：推进到指定阶段 ──────────────────────────────────────
 
-/** 将工作流推进到指定阶段（无条件前进到 targetPhase） */
+/** 将工作流推进到指定阶段（无条件前进到 targetPhase，自动接受跨 schema warning） */
 function advanceTo(engine: any, runId: string, targetPhase: string): void {
   const phases = ["inventory", "analyze", "plan", "scaffold", "translate", "dedup"]
   const idx = phases.indexOf(targetPhase)
@@ -24,7 +24,11 @@ function advanceTo(engine: any, runId: string, targetPhase: string): void {
   const run = engine.status(runId)!
   // 从当前阶段开始推进
   for (let i = phases.indexOf(run.currentPhase); i < idx; i++) {
-    const result = engine.advance(runId, { result: "passed" })
+    let result = engine.advance(runId, { result: "passed" })
+    // 跨 schema warning：测试辅助只需推进，自动接受
+    if (result.rejected && result.warningPending) {
+      result = engine.advance(runId, { result: "passed", acceptWarnings: true })
+    }
     if (result.rejected) throw new Error(`Advance rejected at ${phases[i]}: ${result.rejectionReason}`)
   }
 }
@@ -86,8 +90,9 @@ describe("WorkflowEngine.advance() — 主线前进", () => {
 
   it("连续前进 inventory → analyze → plan", () => {
     ctx.engine.start("sql2java", "run-011")
-    ctx.engine.advance("run-011")
-    ctx.engine.advance("run-011")
+    ctx.engine.advance("run-011") // inventory → analyze
+    // analyze 有 needsCrossSchemaValidation，无 artifact 触发 warning → acceptWarnings
+    ctx.engine.advance("run-011", { acceptWarnings: true }) // analyze → plan
     const run = ctx.engine.status("run-011")!
     expect(run.currentPhase).toBe("plan")
     expect(run.phaseHistory.filter(e => e.status === "completed")).toHaveLength(2)
@@ -112,13 +117,17 @@ describe("WorkflowEngine.advance() — review/verify 分支", () => {
   beforeEach(() => { ctx = createEngineWithTempDir() })
   afterEach(() => { ctx.cleanup() })
 
-  /** 推进到 review 阶段并写入 review-summary */
+  /** 推进到 review 阶段并写入 review-summary（自动接受跨 schema warning） */
   function setupAtReview() {
     ctx.engine.start("sql2java", "run-020")
     // 前进到 review
     const phases = ["inventory", "analyze", "plan", "scaffold", "translate", "dedup"]
     for (const _ of phases) {
-      ctx.engine.advance("run-020")
+      let r = ctx.engine.advance("run-020")
+      if (r.rejected && r.warningPending) {
+        r = ctx.engine.advance("run-020", { acceptWarnings: true })
+      }
+      if (r.rejected) throw new Error(`Advance rejected: ${r.rejectionReason}`)
     }
     return ctx.engine.status("run-020")!
   }

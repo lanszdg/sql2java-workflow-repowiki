@@ -193,7 +193,9 @@ export function makeTranslation(overrides: Record<string, unknown> = {}) {
     files: [{ path: "service/ItemService.java", role: "service-impl" }],
     decisions: [],
     todos: [],
-    subprogramMethods: [],
+    subprogramMethods: [
+      { oracleName: "GET_ITEM", javaClass: "com.example.item.ItemService", javaMethod: "getItem" },
+    ],
     ...overrides,
   }
 }

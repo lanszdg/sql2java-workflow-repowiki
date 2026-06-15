@@ -100,7 +100,8 @@ describe("workflow-transitions dedup 衔接", () => {
     try {
       advanceTo(ctx, "dedup-001", "dedup")
       expect(ctx.engine.status("dedup-001")!.currentPhase).toBe("dedup")
-      const r = ctx.engine.advance("dedup-001")
+      // dedup 有 needsCrossSchemaValidation，无 artifact 触发 warning → acceptWarnings
+      const r = ctx.engine.advance("dedup-001", { acceptWarnings: true })
       expect(r.rejected).toBe(false)
       expect(r.run.currentPhase).toBe("review")
     } finally {

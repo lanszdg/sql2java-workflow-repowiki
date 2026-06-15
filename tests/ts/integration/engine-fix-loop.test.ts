@@ -12,12 +12,16 @@ import { SQL2JAVA_WORKFLOW } from "@workflow/workflow-definitions"
 import { createEngineWithTempDir, writeArtifact } from "../helpers/engine-factory"
 import { makeReviewSummary, makeVerifySummary, makeFixArtifact, makeInventory } from "../helpers/artifact-factory"
 
-/** 推进到 review 阶段并写入 review-summary */
+/** 推进到 review 阶段并写入 review-summary（自动接受跨 schema warning） */
 function setupAtReview(ctx: ReturnType<typeof createEngineWithTempDir>, runId: string) {
   ctx.engine.start("sql2java", runId)
   const phases = ["inventory", "analyze", "plan", "scaffold", "translate", "dedup"]
   for (const _ of phases) {
-    ctx.engine.advance(runId)
+    let r = ctx.engine.advance(runId)
+    if (r.rejected && r.warningPending) {
+      r = ctx.engine.advance(runId, { acceptWarnings: true })
+    }
+    if (r.rejected) throw new Error(`Advance rejected: ${r.rejectionReason}`)
   }
 }
 

@@ -47,6 +47,14 @@ export function advanceToPhase(
     }
     const r = engine.advance(runId)
     if (r.rejected) {
+      // warning pending：测试辅助只需推进到目标阶段，自动接受 warning
+      if (r.warningPending) {
+        const r2 = engine.advance(runId, { acceptWarnings: true })
+        if (r2.rejected) {
+          throw new Error(`advance 被拒绝（离开 ${run.currentPhase}）: ${r2.rejectionReason}`)
+        }
+        continue
+      }
       throw new Error(`advance 被拒绝（离开 ${run.currentPhase}）: ${r.rejectionReason}`)
     }
   }

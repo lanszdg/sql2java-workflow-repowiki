@@ -8,7 +8,7 @@
 
 import { describe, it, expect, afterEach } from "vitest"
 import { createEngineWithTempDir, writeArtifact } from "../helpers/engine-factory"
-import type { WorkflowRun } from "@workflow/engine-core"
+import type { WorkflowRun, CrossSchemaFinding } from "@workflow/engine-core"
 
 const RUN_ID = "run-refname"
 
@@ -52,7 +52,7 @@ describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", ()
   let ctx: ReturnType<typeof createEngineWithTempDir>
   afterEach(() => ctx?.cleanup())
 
-  it("裸名引用重载子程序 → 告警（捕获'裸名撞重载'缺陷）", () => {
+  it("裸名引用重载子程序 → warning（捕获'裸名撞重载'缺陷）", () => {
     ctx = createEngineWithTempDir()
     setupOverloadedUtilPkg(ctx.dir)
     // 覆盖 analysis.callGraph：裸名 get_by_id（非法）+ 合法 get_by_id__1
@@ -62,11 +62,13 @@ describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", ()
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
-    const bare = warnings.find((w) => w.includes("callGraph") && w.includes("get_by_id") && w.includes("不在"))
-    expect(bare, `应告警裸名撞重载，实际 warnings:\n${warnings.join("\n")}`).toBeTruthy()
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
+    const bare = findings.find((f) => f.message.includes("callGraph") && f.message.includes("get_by_id") && f.message.includes("不在"))
+    expect(bare, `应告警裸名撞重载，实际 findings:\n${findings.map(f => f.message).join("\n")}`).toBeTruthy()
+    // callGraph refName 问题应为 warning 级别
+    expect(bare!.severity).toBe("warning")
     // 合法的 __1 不应被告警
-    expect(warnings.some((w) => w.includes("get_by_id__1") && w.includes("不在"))).toBe(false)
+    expect(findings.some((f) => f.message.includes("get_by_id__1") && f.message.includes("不在"))).toBe(false)
   })
 
   it("合法 refName（重载带 __序号）不告警", () => {
@@ -78,8 +80,8 @@ describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", ()
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
-    expect(warnings.some((w) => w.includes("不在") && w.includes("refName"))).toBe(false)
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
+    expect(findings.some((f) => f.message.includes("不在") && f.message.includes("refName"))).toBe(false)
   })
 })
 
@@ -87,7 +89,7 @@ describe("validateCrossSchema — subprogramMethods 校验 (dedup 阶段)", () =
   let ctx: ReturnType<typeof createEngineWithTempDir>
   afterEach(() => ctx?.cleanup())
 
-  it("重复 oracleName → 告警", () => {
+  it("重复 oracleName → warning", () => {
     ctx = createEngineWithTempDir()
     setupOverloadedUtilPkg(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "translations/UTIL_PKG/translation.json", {
@@ -100,11 +102,13 @@ describe("validateCrossSchema — subprogramMethods 校验 (dedup 阶段)", () =
       ],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
-    expect(warnings.some((w) => w.includes("重复 oracleName"))).toBe(true)
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
+    const dup = findings.find((f) => f.message.includes("重复 oracleName"))
+    expect(dup).toBeTruthy()
+    expect(dup!.severity).toBe("warning")
   })
 
-  it("oracleName 用裸名引用重载子程序 → 告警", () => {
+  it("oracleName 用裸名引用重载子程序 → warning", () => {
     ctx = createEngineWithTempDir()
     setupOverloadedUtilPkg(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "translations/UTIL_PKG/translation.json", {
@@ -116,8 +120,10 @@ describe("validateCrossSchema — subprogramMethods 校验 (dedup 阶段)", () =
       ],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
-    expect(warnings.some((w) => w.includes("不在合法 refName 集合内"))).toBe(true)
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
+    const invalid = findings.find((f) => f.message.includes("不在合法 refName 集合内"))
+    expect(invalid).toBeTruthy()
+    expect(invalid!.severity).toBe("warning")
   })
 
   it("合法 subprogramMethods 不告警", () => {
@@ -133,8 +139,8 @@ describe("validateCrossSchema — subprogramMethods 校验 (dedup 阶段)", () =
       ],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
-    expect(warnings.some((w) => w.includes("subprogramMethods"))).toBe(false)
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("dedup"), "dedup")
+    expect(findings.some((f) => f.message.includes("subprogramMethods"))).toBe(false)
   })
 })
 
@@ -155,8 +161,8 @@ describe("validateCrossSchema — subprogramMethods 校验 (translate 阶段，t
       ],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("translate"), "translate")
-    expect(warnings.some((w) => w.includes("重复 oracleName"))).toBe(true)
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("translate"), "translate")
+    expect(findings.some((f) => f.message.includes("重复 oracleName"))).toBe(true)
   })
 
   it("callGraph 校验不在 translate 触发（仅 analyze），translate 不应报 callGraph refName 问题", () => {
@@ -168,8 +174,8 @@ describe("validateCrossSchema — subprogramMethods 校验 (translate 阶段，t
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })
 
-    const warnings = ctx.engine.validateCrossSchema(makeRun("translate"), "translate")
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("translate"), "translate")
     // translate 阶段不校验 callGraph，故裸名不应被告警
-    expect(warnings.some((w) => w.includes("callGraph") && w.includes("不在"))).toBe(false)
+    expect(findings.some((f) => f.message.includes("callGraph") && f.message.includes("不在"))).toBe(false)
   })
 })
