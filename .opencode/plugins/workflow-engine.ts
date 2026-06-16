@@ -1016,23 +1016,6 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           args: { action: { type: "string" } },
           execute: async () => "❌ 工作流引擎依赖未安装。请手动执行：cd .opencode && npm install",
         },
-        // wfutil 不依赖 zod/plugin，即使 depsOk=false 也应可用
-        wfutil: {
-          description: "Workflow file utility (stub — deps missing)",
-          args: { command: { type: "string" }, args: { type: "array", items: { type: "string" } } },
-          execute: async (input: any) => {
-            const opencodeDir = findOpencodeDir()
-            const wfutilPath = join(opencodeDir, "workflow", "wf-util.js")
-            if (!existsSync(wfutilPath)) return `❌ wf-util.js not found at ${wfutilPath}`
-            try {
-              delete require.cache[require.resolve(wfutilPath)]
-              const wfutil = require(wfutilPath) as { runCommand: (cmd: string, args: string[]) => string }
-              return wfutil.runCommand(input.command, input.args ?? []) || "(no output)"
-            } catch (e: any) {
-              return `❌ wfutil ${input.command} error: ${e.message}`
-            }
-          },
-        },
       },
     }
   }
@@ -2012,38 +1995,6 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
     }),
   },
 
-  // ── Tool: wfutil — 工作流文件操作工具集（进程内执行，不依赖系统 bun/node） ──
-  // 替代原 prompt 中 `bun .opencode/workflow/wf-util.js <cmd>` 的 bash 子进程调用，
-  // 解决 Windows 打包 exe 环境下系统 PATH 无 bun/node 的问题。
-  wfutil: toolFn({
-    description:
-      "Workflow file utility commands (mkdir/count-json/list-json/find-json/exists/timestamp/init-analysis-packages/grep-calls/validate-fsd/check-stubs). " +
-      "Runs in-process — no bash/exec, works without bun/node on PATH.",
-    args: {
-      command: zFn.enum([
-        "mkdir", "count-json", "list-json", "find-json",
-        "exists", "timestamp", "init-analysis-packages",
-        "grep-calls", "validate-fsd", "check-stubs",
-      ]),
-      args: zFn.array(zFn.string()).optional().default([]),
-    },
-    execute: async (input: any) => {
-      const opencodeDir = findOpencodeDir()
-      const wfutilPath = join(opencodeDir, "workflow", "wf-util.js")
-      if (!existsSync(wfutilPath)) {
-        return `❌ wf-util.js not found at ${wfutilPath}`
-      }
-      try {
-        // 清除 require 缓存，确保拿到最新代码（开发时文件可能被修改）
-        delete require.cache[require.resolve(wfutilPath)]
-        const wfutil = require(wfutilPath) as { runCommand: (cmd: string, args: string[]) => string }
-        const result = wfutil.runCommand(input.command, input.args ?? [])
-        return result || "(no output)"
-      } catch (e: any) {
-        return `❌ wfutil ${input.command} error: ${e.message}`
-      }
-    },
-  }),
   },
 
   // ── Hook: tool.execute.after — 大输出截断 ──
