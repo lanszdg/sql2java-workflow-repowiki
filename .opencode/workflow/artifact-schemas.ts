@@ -100,7 +100,7 @@ export const InventoryIndexSchema = z.object({
   })),
 
   callGraph: z.record(z.string(), z.array(z.string())).optional(),
-})
+}).passthrough()
 
 // ============================================================================
 // Inventory Package Schema（逐包 inventory，LLM enriched）
@@ -140,11 +140,10 @@ export const InventoryPackageSchema = z.object({
     type: z.string(),
     value: z.string(),
   })),
-}).refine(
+}).passthrough().refine(
   pkg => pkg.procedures.length === 0 || pkg.bodyFile !== undefined,
   { message: "有 procedures 的包必须有 bodyFile（procedure 实现体在 body 中）" }
 )
-
 // ============================================================================
 // Inventory Schema（索引模式：packages 拆分为 per-package 文件，DDL 保留在此）
 // ============================================================================
@@ -206,7 +205,7 @@ export const InventorySchema = z.object({
     maxValue: z.number().nullable().optional(),
     cycle: z.boolean().nullable().optional(),
   })),
-})
+}).passthrough()
 
 // ============================================================================
 // Analysis Schema（拆分为 Meta + Per-Package）
@@ -255,13 +254,13 @@ export const AnalysisMetaSchema = z.object({
   })),
   sccGroups: z.array(z.array(z.string())),
   packageNames: z.array(z.string()),
-})
+}).passthrough()
 
 /** analysis-packages/{pkg}.json — 逐包子程序结构 */
 export const AnalysisPackageSchema = z.object({
   packageName: z.string(),
   subprograms: z.array(SubprogramSchema),
-})
+}).passthrough()
 
 /** @deprecated 旧格式兼容，仅用于跨 Schema 校验的 fallback */
 export const AnalysisSchema = z.object({
@@ -279,7 +278,7 @@ export const AnalysisSchema = z.object({
     subprograms: z.array(SubprogramSchema),
   })).optional(),
   packageNames: z.array(z.string()).optional(),
-})
+}).passthrough()
 
 // ============================================================================
 // Plan Schema
@@ -316,7 +315,7 @@ export const PlanSchema = z.object({
   })),
 
   conventions: z.string(),
-})
+}).passthrough()
 
 // ============================================================================
 // Scaffold Schema
@@ -376,7 +375,7 @@ export const ScaffoldSchema = z.object({
   }),
   conventions: z.string(),
   basedOnPlanHash: z.string().nullable().optional(),
-})
+}).passthrough()
 
 // ============================================================================
 // Translation Schema（每包一个）
@@ -431,7 +430,7 @@ export const TranslationSchema = z.object({
     (methods) => new Set(methods.map((m) => m.oracleName.toUpperCase())).size === methods.length,
     { message: "subprogramMethods.oracleName 必须唯一（重载子程序用 {name}__序号 区分，禁用裸名重复）" },
   ).default([]),
-})
+}).passthrough()
 
 // ============================================================================
 // 共享 Refine 描述（消除 ReviewSchema/VerifySchema 和 Summary Schema 之间的复制粘贴）
@@ -475,7 +474,7 @@ export const ReviewSchema = z.object({
   })).default([]),
   suggestions: z.array(z.unknown()),
   todoRemainingCount: z.coerce.number(),
-}).refine(
+}).passthrough().refine(
   passedMustFixRefine.check,
   { message: passedMustFixRefine.message }
 )
@@ -494,7 +493,7 @@ export const ReviewSummarySchema = z.object({
   })),
   totalMustFix: z.coerce.number(),
   totalTodosRemaining: z.coerce.number(),
-}).refine(
+}).passthrough().refine(
   allPassedRefine.check,
   { message: allPassedRefine.message }
 )
@@ -520,7 +519,7 @@ export const VerifySchema = z.object({
     line: z.coerce.number().nullable().optional(),
     issue: z.string(),
   })).default([]),
-}).refine(
+}).passthrough().refine(
   passedMustFixRefine.check,
   { message: passedMustFixRefine.message }
 )
@@ -565,7 +564,7 @@ export const VerifySummarySchema = z.object({
     packageName: z.string(),
     issue: z.string(),
   })).optional(),
-}).refine(
+}).passthrough().refine(
   allPassedRefine.check,
   { message: allPassedRefine.message }
 ).refine(
@@ -625,7 +624,7 @@ export const DedupSchema = z.object({
     linesRemoved: z.number(),
     linesAdded: z.number(),
   }),
-})
+}).passthrough()
 
 // ============================================================================
 // Fix Artifact Schema（fix 阶段产出）
@@ -633,7 +632,7 @@ export const DedupSchema = z.object({
 
 export const FixArtifactSchema = z.object({
   fixedPackages: z.array(z.string().min(1)),
-}).refine(
+}).passthrough().refine(
   data => data.fixedPackages.length > 0,
   { message: "fixedPackages 不能为空，fix 必须至少修复一个包" }
 )

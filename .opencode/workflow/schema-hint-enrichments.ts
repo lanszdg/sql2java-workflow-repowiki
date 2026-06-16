@@ -162,6 +162,7 @@ export const CROSS_SCHEMA_HINTS: Record<string, string[]> = {
 export const COMMON_PITFALLS: Record<string, string[]> = {
   "inventory-index": [
     'scannerUsed 自动 normalize 为小写，"AST"/"Regex" 等任意大小写均可通过',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   inventory: [
     'optional 字段（defaultValue/bodyFile/returnType/specFile/ddlFile 等）可省略或写 null，均可通过校验',
@@ -171,6 +172,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'triggers.level 自动 normalize 为小写：任意大小写均可通过',
     'triggers.events 每个元素自动 normalize 为小写：任意大小写均可通过',
     '有 procedures 的包必须提供 bodyFile（空串或 null 均可）；无 body 的包可省略该键',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   analyze: [
     'riskLevel 自动 normalize 为小写：任意大小写均可通过',
@@ -178,12 +180,14 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'callGraph key 格式为 PKG.refName；重载子程序用 {name}__序号（如 CALC__1），不能用裸名',
     'block.type 推荐为以下之一（小写）："loop" / "cursor" / "if-else" / "exception-block" / "sql-statement" / "assignment" / "call"（不限死，但推荐使用这些值）',
     'subprograms[].translationNotes 是 string[]（每条注意事项一个元素），不是单个字符串——如 ["注意空值处理", "循环边界需验证"]',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   plan: [
     'namingConvention 推荐值：camelCase / keep-oracle / mixed（不限死）',
     'nullHandling 推荐值：optional / nullable / throw-empty',
     'exceptionStrategy 推荐值：spring-data / custom-business / oracle-mirror',
     'logFramework 推荐值：slf4j / log4j2',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   scaffold: [
     'commonModules.classes.category 推荐全小写，如 "type-mapper" / "mybatis-fragment" / "mapper-interface" / "test-base"（不限死）',
@@ -193,6 +197,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'h2SchemaFile 指向的文件必须存在于磁盘（src/test/resources/schema-h2.sql）',
     'schema-h2.sql 必须覆盖 inventory.json 中所有 tables 和 sequences',
     'schema-h2.sql 中 UDT 列必须跳过并加注释（-- H2 不支持 Oracle UDT），不能生成 H2 不支持的类型',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   translate: [
     'status 推荐值："completed" / "partial"（不限死，允许其他状态值）',
@@ -205,6 +210,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'H2 确实不兼容的 SQL 标 @Disabled（不修改 Mapper XML）',
     '测试数据 INSERT 使用硬编码 ID 值（不使用 SEQ.NEXTVAL）',
     'JdbcTemplate INSERT 测试数据的列必须与 schema-h2.sql 一致',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   review: [
     'severity 推荐小写："critical" / "major" / "minor" / "info"（不限死）',
@@ -212,16 +218,20 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'passed=true 时 mustFix 必须为 []，passed=false 时 mustFix 必须非空——这是最常见的被拒原因',
     'overallScore 范围 0-100，passed=true 时必须 ≥ 70',
     'suggestions 可写字符串数组或对象数组',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   verify: [
     'compilation.success=false 时 compilation.errors 必须存在（空数组 [] 也可通过）',
     'passed=true 时 mustFix 必须为 []，passed=false 时 mustFix 必须非空',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   dedup: [
     'extractedModules.category 推荐全小写，如 "type-mapper" / "mybatis-fragment" / "mapper-interface" / "test-base"（不限死）',
     'affectedPackages 和 packageChanges.packageName 必须引用 inventory 中实际存在的包名',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   fix: [
     'fixedPackages 不能为空数组，至少包含一个被修复的包名',
+    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
 }

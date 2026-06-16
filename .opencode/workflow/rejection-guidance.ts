@@ -3,7 +3,15 @@
  *
  * 设计意图：Zod 只检查结构合规性，LLM 可能凑字段过关。
  * 追加的引导语指明"此错误通常意味着执行不完整"，引导 LLM 回到正确的执行路径。
+ *
+ * P2c: 新增结构 vs 内容区分：
+ *   - STRUCTURAL_FIX_GUIDANCE: 格式问题，只需修正 JSON 字段
+ *   - PHASE_REJECTION_GUIDANCE: 内容问题，需重新执行阶段工作
  */
+
+/** 结构格式问题的引导语 */
+export const STRUCTURAL_FIX_GUIDANCE =
+  "⚠️ 这是结构格式问题。你不需要重新执行阶段工作，只需修正上方列出的具体 JSON 字段即可。确保 JSON 结构完全符合 Schema 校验要求。"
 
 /** 阶段 → 针对性引导语 */
 export const PHASE_REJECTION_GUIDANCE: Record<string, string> = {
@@ -30,9 +38,15 @@ export const PHASE_REJECTION_GUIDANCE: Record<string, string> = {
 }
 
 /** 为 rejection 消息追加阶段针对性引导语 */
-export function enhanceRejection(phase: string | null, rawError: string): string {
+export function enhanceRejection(
+  phase: string | null,
+  rawError: string,
+  isStructural: boolean = false,
+): string {
   if (!phase) return rawError
-  const guidance = PHASE_REJECTION_GUIDANCE[phase]
+  const guidance = isStructural
+    ? STRUCTURAL_FIX_GUIDANCE
+    : PHASE_REJECTION_GUIDANCE[phase]
   if (!guidance) return rawError
   return `${rawError}\n\n${guidance}`
 }

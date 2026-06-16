@@ -859,6 +859,196 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
   return null
 }
 
+// ══════════════════════════════════════════════════════════════════
+// P2a: Auto-fix 表面结构问题（strip 不合法的 null 值）
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * 递归删除 JSON 对象中值为 null 的 key（仅当该 key 在 schema 中是 optional 但不是 nullable 时）。
+ *
+ * 策略：先尝试 Zod safeParse，如果失败，从错误信息中提取 "received null" 的路径，
+ * 只删除那些报错的 null 字段，保留 .nullable() 字段中的合法 null。
+ * 如果首次 safeParse 通过，则不需要任何修改。
+ */
+function stripInvalidNulls(obj: any, schema: import("zod").ZodType): any {
+  // 先试一次 safeParse，如果通过则无需修改
+  const firstTry = schema.safeParse(obj)
+  if (firstTry.success) return obj
+
+  // 收集所有 "received null" 的错误路径
+  const nullPaths: string[][] = []
+  if (!firstTry.success) {
+    for (const issue of firstTry.error.issues) {
+      if (issue.message.includes("null") || issue.message.toLowerCase().includes("expected") && issue.message.includes("null")) {
+        nullPaths.push(issue.path.map(String))
+      }
+    }
+  }
+  if (nullPaths.length === 0) return obj
+
+  // 递归删除指定路径上的 null 值
+  return deletePaths(obj, nullPaths)
+}
+
+/** 递归删除 JSON 中指定路径的 null 值 */
+function deletePaths(obj: any, paths: string[][]): any {
+  let changed = false
+  const result = Array.isArray(obj) ? [...obj] : { ...obj }
+
+  // 精确删除：如果某个 path 完全匹配，且当前值为 null
+  for (const path of paths) {
+    if (path.length === 0) continue
+    let current: any = result
+    let valid = true
+    for (let i = 0; i < path.length - 1; i++) {
+      if (current == null || typeof current !== "object") { valid = false; break }
+      current = current[path[i]]
+    }
+    if (!valid) continue
+    const lastKey = path[path.length - 1]
+    if (current != null && typeof current === "object" && current[lastKey] === null) {
+      delete current[lastKey]
+      changed = true
+    }
+  }
+
+  // 递归处理嵌套对象/数组（处理子路径）
+  for (const key of Object.keys(result)) {
+    if (result[key] !== null && typeof result[key] === "object") {
+      const subPaths = paths
+        .filter(p => p.length > 1 && p[0] === key)
+        .map(p => p.slice(1))
+      if (subPaths.length > 0) {
+        const sub = deletePaths(result[key], subPaths)
+        if (sub !== result[key]) {
+          result[key] = sub
+          changed = true
+        }
+      }
+    }
+  }
+
+  return changed ? result : obj
+}
+
+/** 对单个 artifact 文件执行 auto-fix（strip 不合法的 null）并写回 */
+function stripNullsAndRewrite(filePath: string, schema?: import("zod").ZodType): boolean {
+  try {
+    const raw = readFileSync(filePath, "utf-8")
+    const parsed = JSON.parse(raw)
+    if (!schema) {
+      // 无 schema 时不做修改
+      return false
+    }
+    const stripped = stripInvalidNulls(parsed, schema)
+    if (stripped !== parsed) {
+      safeWriteFile(filePath, JSON.stringify(stripped, null, 2))
+      return true
+    }
+  } catch {
+    // 读取/解析失败 → 跳过，由 Zod 校验报错
+  }
+  return false
+}
+
+/**
+ * 自动修复当前阶段的表面结构问题（strip null 值）。
+ * 返回是否有文件被修复，以及修复的文件列表。
+ */
+function autoFixStructuralIssues(run: WorkflowRun): {
+  fixed: boolean
+  files: string[]
+  summary: string
+} {
+  const phase = run.currentPhase
+  if (!phase) return { fixed: false, files: [], summary: "" }
+  const artifactsDir = join(ARTIFACT_DIR, run.runId)
+  const fixedFiles: string[] = []
+
+  // 1. 顶层 schema artifact
+  const topLevelSchema = getSchemaForPhase(phase)
+  if (topLevelSchema) {
+    const fileName = getArtifactFilename(phase)
+    const filePath = join(artifactsDir, `${fileName}.json`)
+    if (existsSync(filePath) && stripNullsAndRewrite(filePath, topLevelSchema)) {
+      fixedFiles.push(`${fileName}.json`)
+    }
+  }
+
+  // 2. per-package artifacts (translate/review/verify)
+  const perPkgSchema = getPerPackageSchema(phase)
+  if (perPkgSchema) {
+    const pkgFileName = getArtifactFilename(phase)
+    const translationsDir = join(artifactsDir, "translations")
+    if (existsSync(translationsDir)) {
+      try {
+        for (const dir of readdirSync(translationsDir, { withFileTypes: true })) {
+          if (!dir.isDirectory()) continue
+          const filePath = join(translationsDir, dir.name, `${pkgFileName}.json`)
+          if (existsSync(filePath) && stripNullsAndRewrite(filePath, perPkgSchema)) {
+            fixedFiles.push(`translations/${dir.name}/${pkgFileName}.json`)
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // 3. summary artifacts (review-summary, verify-summary)
+  const summarySchema = getSummarySchema(`${phase}-summary`)
+  if (summarySchema) {
+    const filePath = join(artifactsDir, `${phase}-summary.json`)
+    if (existsSync(filePath) && stripNullsAndRewrite(filePath, summarySchema)) {
+      fixedFiles.push(`${phase}-summary.json`)
+    }
+  }
+
+  // 4. inventory per-package
+  if (phase === "inventory") {
+    const invPkgSchema = getInventoryPackageSchema()
+    const invPkgDir = join(artifactsDir, "inventory-packages")
+    if (existsSync(invPkgDir)) {
+      try {
+        for (const f of readdirSync(invPkgDir).filter(f => f.endsWith(".json"))) {
+          const filePath = join(invPkgDir, f)
+          if (stripNullsAndRewrite(filePath, invPkgSchema)) {
+            fixedFiles.push(`inventory-packages/${f}`)
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    // inventory-index.json
+    const idxSchema = getSchemaForPhase("inventory-index")
+    const idxPath = join(artifactsDir, "inventory-index.json")
+    if (existsSync(idxPath) && stripNullsAndRewrite(idxPath, idxSchema ?? undefined)) {
+      fixedFiles.push("inventory-index.json")
+    }
+  }
+
+  // 5. analyze per-package
+  if (phase === "analyze") {
+    const anaPkgSchema = getAnalysisPackageSchema()
+    const anaPkgDir = join(artifactsDir, "analysis-packages")
+    if (existsSync(anaPkgDir)) {
+      try {
+        for (const f of readdirSync(anaPkgDir).filter(f => f.endsWith(".json"))) {
+          const filePath = join(anaPkgDir, f)
+          if (stripNullsAndRewrite(filePath, anaPkgSchema)) {
+            fixedFiles.push(`analysis-packages/${f}`)
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    fixed: fixedFiles.length > 0,
+    files: fixedFiles,
+    summary: fixedFiles.length > 0
+      ? `Stripped null values from: ${fixedFiles.join(", ")}`
+      : "",
+  }
+}
+
 /**
  * 校验 --phases 前置依赖（支持 OR-group）
  * 返回缺失项列表，空数组表示全部通过
@@ -979,6 +1169,12 @@ function truncateStringsDeep(obj: unknown, maxLength: number): unknown {
     }
     return result
   }
+}
+
+/** 判断文件路径是否为 Java/项目文件（用于 write 工具路径拦截） */
+function isProjectFile(path: string): boolean {
+  return /\.(java|xml|yml|yaml|properties|sql)$/i.test(path)
+    && !path.endsWith(".json")
 }
 
 // ── 插件导出 ──────────────────────────────────────────────────────────────────
@@ -1239,15 +1435,41 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             if (statusBefore && statusBefore.status === "running" && !isFixFailed) {
               const validationError = validateArtifactOnDisk(statusBefore)
               if (validationError) {
-                const enhancedError = enhanceRejection(statusBefore.currentPhase, validationError)
-                return {
-                  title: "Validation Failed",
-                  output: enhancedError,
-                  metadata: {
-                    rejected: true,
-                    rejectionReason: enhancedError,
-                    nextAction: "dispatch",
-                  },
+                // P2b: 尝试 auto-fix 表面结构问题（strip null 值）
+                const fixResult = autoFixStructuralIssues(statusBefore)
+                if (fixResult.fixed) {
+                  // 重新校验
+                  const recheck = validateArtifactOnDisk(statusBefore)
+                  if (!recheck) {
+                    // auto-fix 成功，允许 advance 继续
+                    getLogger().info("[advance]", `Auto-fixed structural issues: ${fixResult.summary}`)
+                  } else {
+                    // auto-fix 后仍有问题，按结构问题拒绝
+                    const isStructural = true
+                    const enhancedError = enhanceRejection(statusBefore.currentPhase, recheck, isStructural)
+                    return {
+                      title: "Validation Failed",
+                      output: enhancedError,
+                      metadata: {
+                        rejected: true,
+                        rejectionReason: enhancedError,
+                        nextAction: "dispatch",
+                      },
+                    }
+                  }
+                } else {
+                  // 无法 auto-fix，按内容问题拒绝
+                  const isStructural = false
+                  const enhancedError = enhanceRejection(statusBefore.currentPhase, validationError, isStructural)
+                  return {
+                    title: "Validation Failed",
+                    output: enhancedError,
+                    metadata: {
+                      rejected: true,
+                      rejectionReason: enhancedError,
+                      nextAction: "dispatch",
+                    },
+                  }
                 }
               }
             }
@@ -1861,24 +2083,55 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
+            // P3c: projectRoot + 文件写入路径映射（plan 阶段之后才有 projectRoot）
+            const planForDispatch = engine.loadArtifactJson(`${ARTIFACT_DIR}/${run.runId}`, "plan")
+            if (planForDispatch) {
+              const artifactId = (planForDispatch.targetProject as any)?.artifactId
+              if (artifactId) {
+                const projectRoot = join(resolveProjectRoot(), "generated", artifactId)
+                workOrderParts.push(
+                  `- projectRoot: ${projectRoot}  ← Java/项目文件写入此目录`,
+                )
+              }
+            }
+
             workOrderParts.push(
               ``,
               `## 指令`,
               `1. 按 Phase 指令读取上游 artifact（使用上方完整路径）并执行工作`,
-              `2. 将产出物写入 artifactsDir 目录`,
+              `2. 将产出物写入正确目录（见下方路径规则）`,
               `3. 写入 Worker Status: ${artifactsDir}/status/${run.currentPhase}.json`,
               `4. 输出阶段小结（WORKER_SUMMARY 格式）`,
             )
 
-            if (artifactValidationError) {
-              // 修正模式：注入校验错误，Worker 必须先修正再继续
-              const enhancedError = enhanceRejection(run.currentPhase, artifactValidationError)
+            // P3c: 路径规则（plan 之后阶段才有 projectRoot 概念）
+            if (planForDispatch && (planForDispatch.targetProject as any)?.artifactId) {
+              const artifactId = (planForDispatch.targetProject as any).artifactId
+              const projectRoot = join(resolveProjectRoot(), "generated", artifactId)
               workOrderParts.push(
                 ``,
-                `## ⚠️ 上次 advance 被拒绝——必须先修正以下问题`,
+                `## 📂 文件写入路径（强制）`,
+                `- JSON artifact（scaffold.json、translation.json 等）→ saveArtifact 工具 → artifactsDir`,
+                `- Java/.xml/.yml/.properties/.sql 等 Spring Boot 项目文件 → write 工具 → projectRoot（${projectRoot}）`,
+                `- ❌ 禁止将项目文件写入 artifactsDir/translations/`,
+                `- scaffold.json 的 projectRoot 字段必须使用上方注入值，不可自行编造`,
+              )
+            }
+
+            if (artifactValidationError) {
+              // 判断是结构问题还是内容问题（简单启发式：Zod 错误 = 结构，质量门控 = 内容）
+              const isStructural = !artifactValidationError.includes("质量门控") && !artifactValidationError.includes("校验失败（阻塞级）")
+              const enhancedError = enhanceRejection(run.currentPhase, artifactValidationError, isStructural)
+              workOrderParts.push(
+                ``,
+                isStructural
+                  ? `## ⚠️ 上次 advance 被拒绝——结构格式问题，只需修正 JSON`
+                  : `## ⚠️ 上次 advance 被拒绝——必须先修正以下问题`,
                 enhancedError,
                 ``,
-                `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY。**`,
+                isStructural
+                  ? `**这是结构格式问题。只需修正上方列出的具体 JSON 字段，不需要重新执行阶段工作。**`
+                  : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY。**`,
                 `**不要只改格式凑校验——必须确保内容完整且正确。**`,
               )
             }
@@ -1891,6 +2144,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               ``,
               `如果写入 artifact 时遇到问题，在你的输出中说明，编排者会处理。`,
             )
+
+            // D15: 在 workOrder 中完整包含 schema hint
+            // system prompt 不再注入 schema hint（单一来源原则，避免双源不一致导致 LLM 困惑）
+            const schemaHint = renderSchemaHint(run.currentPhase)
+            if (schemaHint) {
+              workOrderParts.push('', schemaHint)
+            }
 
             const workOrder = workOrderParts.join("\n")
 
@@ -1974,6 +2234,23 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
         }
 
+        // P3b: scaffold.json 的 projectRoot 强制覆写为引擎计算值
+        if (args.path === "scaffold.json") {
+          const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${runId}`, "plan")
+          const artifactId = (planArtifact?.targetProject as any)?.artifactId
+          if (artifactId) {
+            const expectedRoot = join(resolveProjectRoot(), "generated", artifactId)
+            try {
+              const parsed = JSON.parse(args.content)
+              if (parsed.projectRoot !== expectedRoot) {
+                parsed.projectRoot = expectedRoot
+                args.content = JSON.stringify(parsed, null, 2)
+                getLogger().info("[saveArtifact]", `Overrode scaffold.json projectRoot → ${expectedRoot}`)
+              }
+            } catch { /* already validated above */ }
+          }
+        }
+
         // 原子写入（safeWriteFile 内含 mkdir + tmp → rename + 清理）
         let writeErr: Error | undefined
         safeWriteFile(fullPath, args.content, (e) => { writeErr = e })
@@ -1993,6 +2270,54 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         return `✅ saved: ${args.path} (${sizeKB} KB)`
       },
     }),
+  },
+
+  // ── Hook: tool.execute.before — 文件写入路径拦截（P3a） ──
+  // 当 LLM 用 write 工具写 Java/项目文件到错误位置时，拦截并重定向到 projectRoot
+  "tool.execute.before": async (input: any, output: any) => {
+    if (!currentWorkflowContext || input.tool !== "write") return
+
+    const filePath = resolve(output.args?.file_path ?? "")
+    if (!filePath) return
+
+    // 只拦截项目文件（.java/.xml/.yml/.properties/.sql），不拦截 .json/.md 等
+    if (!isProjectFile(filePath)) return
+
+    const artifactsDir = resolve(join(ARTIFACT_DIR, currentWorkflowContext.runId))
+
+    // 计算 projectRoot（plan 阶段之后才存在）
+    const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${currentWorkflowContext.runId}`, "plan")
+    if (!planArtifact) return
+    const artifactId = (planArtifact.targetProject as any)?.artifactId
+    if (!artifactId) return
+    const projectRoot = resolve(join(resolveProjectRoot(), "generated", artifactId))
+
+    // 规则1: 项目文件写到 artifactsDir/translations/ → 重定向到 projectRoot
+    if (filePath.startsWith(artifactsDir + sep) && filePath.includes(sep + "translations" + sep)) {
+      const srcIdx = filePath.indexOf(sep + "src" + sep)
+      if (srcIdx > 0) {
+        const relativePath = filePath.substring(srcIdx + 1)
+        const correctedPath = join(projectRoot, relativePath)
+        output.args = { ...output.args, file_path: correctedPath }
+        getLogger().warn("[write-intercept]", `Redirected: ${filePath} → ${correctedPath}`)
+        return
+      }
+      // 无法提取 src/ 路径时，至少移出 artifactsDir
+      const relFromArtifacts = filePath.substring(artifactsDir.length + 1)
+      // 移除 translations/{pkg}/ 前缀
+      const cleaned = relFromArtifacts.replace(/^[^/]+\/translations\/[^/]+\//, "")
+      const correctedPath = join(projectRoot, cleaned)
+      output.args = { ...output.args, file_path: correctedPath }
+      getLogger().warn("[write-intercept]", `Redirected (fallback): ${filePath} → ${correctedPath}`)
+      return
+    }
+
+    // 规则2: pom.xml 写到错误位置 → 重定向到 projectRoot
+    if (filePath.endsWith("pom.xml") && !filePath.startsWith(projectRoot)) {
+      const correctedPath = join(projectRoot, "pom.xml")
+      output.args = { ...output.args, file_path: correctedPath }
+      getLogger().warn("[write-intercept]", `Redirected pom.xml → ${correctedPath}`)
+    }
   },
 
   // ── Hook: tool.execute.after — 大输出截断 ──
@@ -2076,12 +2401,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         const javaCodeSpec = rawSpec || (needsJavaSpec
           ? "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
           : "")
-        // D13: 注入当前阶段的 Schema 校验要求（advance 时的 Zod + 引擎级校验 + 质量门控）
-        const schemaHint = renderSchemaHint(currentWorkflowContext.phase)
+        // D13 已迁至 dispatch workOrder — schema hint 不再注入 system prompt（单一来源原则）
         const parts = [
           common,
           phaseSection,
-          schemaHint,
           javaCodeSpec,
           sharedInstructions,
           runtimeContext ? "## Runtime Context\n\n" + runtimeContext : "",
