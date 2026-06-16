@@ -230,6 +230,46 @@ translation.json 包含：
 - `todos`：TODO 标记（file, issue, oracleLine, suggestion）
 - `subprogramMethods`：本包每个子程序 → Java 调用入口索引，供「依赖本包的后续翻译包」对接跨包调用。每项 `{ oracleName=refName, javaClass=Service 接口全限定名(如 com.example.util.BService), javaMethod, javaFile?=接口文件路径 }`；重载子程序 oracleName 用 `{name}__{序号}` 区分（与 refName 一致）
 
+完整示例：
+
+```json
+{
+  "packageName": "PKG_ORDER",
+  "status": "completed",
+  "completedSubprograms": ["create_order", "cancel_order", "get_param__1", "get_param__2"],
+  "totalSubprograms": 4,
+  "files": [
+    { "path": "src/main/java/com/example/ordersystem/mapper/OrderMapper.java", "role": "mapper-interface" },
+    { "path": "src/main/resources/mapper/OrderMapper.xml", "role": "mapper-xml" },
+    { "path": "src/main/java/com/example/ordersystem/service/OrderService.java", "role": "service" },
+    { "path": "src/main/java/com/example/ordersystem/service/impl/OrderServiceImpl.java", "role": "service-impl" },
+    { "path": "src/main/java/com/example/ordersystem/dto/CreateOrderRequest.java", "role": "dto" },
+    { "path": "src/test/java/com/example/ordersystem/service/impl/OrderServiceImplTest.java", "role": "test" },
+    { "path": "src/test/java/com/example/ordersystem/mapper/OrderMapperIntegrationTest.java", "role": "mapper-integration-test" }
+  ],
+  "decisions": [
+    { "line": 15, "oracleConstruct": "SELECT ... INTO", "javaConstruct": "Mapper.selectByCondition()", "reason": "单行查询映射为 Mapper 方法 + 空值校验", "confidence": "high" },
+    { "line": 32, "oracleConstruct": "EXECUTE IMMEDIATE", "javaConstruct": "// TODO: [translate]", "reason": "动态 SQL 需手动审查", "confidence": "low" }
+  ],
+  "todos": [
+    { "file": "src/main/java/.../OrderServiceImpl.java", "issue": "动态 SQL 需手动实现", "oracleLine": 32, "suggestion": "考虑使用 MyBatis 动态 SQL 替代" }
+  ],
+  "subprogramMethods": [
+    { "oracleName": "create_order", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "createOrder", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
+    { "oracleName": "cancel_order", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "cancelOrder", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
+    { "oracleName": "get_param__1", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "getParamByName", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
+    { "oracleName": "get_param__2", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "getParamById", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" }
+  ]
+}
+```
+
+**关键字段说明**：
+- `files[].role`：推荐值 `"mapper-interface"` / `"mapper-xml"` / `"service"` / `"service-impl"` / `"dto"` / `"exception"` / `"test"` / `"mapper-integration-test"`
+- `decisions[].confidence`：推荐 `"high"` / `"medium"` / `"low"`
+- `subprogramMethods[].oracleName`：重载子程序必须用 `{name}__{序号}`（与 refName/callGraph 一致），禁止裸名重复
+- `subprogramMethods[].javaClass`：**Service 接口全限定名**（如 `com.example.ordersystem.order.OrderService`），不是简单类名
+- `totalSubprograms`：数字类型，支持字符串自动转换（写 `"5"` 等同 5）
+
 ### 中断恢复
 
 如果 translate 阶段被中断后恢复（retry）：

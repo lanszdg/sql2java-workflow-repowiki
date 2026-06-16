@@ -128,7 +128,6 @@ permission:
    - 空 TODO 测试方法标记为 mustFix（severity: major）
    - 缺少 Mapper XML statement 对应测试方法标记为 mustFix（severity: minor）
 5. **产出 per-package review.json**：每审完一个包立即写入，包含：
-4. **产出 per-package review.json**：每审完一个包立即写入，包含：
    - `packageName`：Oracle 包名
    - `passed`：是否通过
    - `overallScore`：0-100 分
@@ -137,6 +136,40 @@ permission:
    - `suggestions`：改进建议
    - `todoRemainingCount`：该包的 TODO 残留数
 
+   完整示例：
+
+   ```json
+   {
+     "packageName": "PKG_ORDER",
+     "passed": false,
+     "overallScore": 72,
+     "procedureReviews": [
+       {
+         "procedure": "create_order",
+         "checks": [
+           { "category": "logic-equivalence", "passed": true, "detail": "分支条件与源码一致", "severity": "info" },
+           { "category": "null-handling", "passed": false, "detail": "NVL(p_status, 'A') 未映射，直接使用 p_status 可能 NPE", "severity": "major" }
+         ]
+       }
+     ],
+     "mustFix": [
+       { "file": "src/main/java/.../OrderServiceImpl.java", "line": 45, "issue": "NVL 未映射：p_status 可能为 null，需用 Optional.ofNullable 或默认值" }
+     ],
+     "suggestions": [
+       "考虑在 OrderMapper.xml 中使用 <if> 标签处理动态条件"
+     ],
+     "todoRemainingCount": 1
+   }
+   ```
+
+   **关键字段说明**：
+   - `passed=true` 时 `mustFix` **必须为空数组 `[]`**；`passed=false` 时 `mustFix` **必须非空** — 这是最常见的被拒原因
+   - `overallScore` 范围 0-100，`passed=true` 时必须 ≥ 70
+   - `procedureReviews[].checks[].category`：推荐全小写，如 `"logic-equivalence"` / `"null-handling"` / `"exception-mapping"` 等（与 20 类审查清单对应，不限死）
+   - `procedureReviews[].checks[].severity`：推荐 `"critical"` / `"major"` / `"minor"` / `"info"`
+   - `mustFix[].line`：可选（`null` 或数字），无法确定行号时省略或写 `null`
+   - `suggestions`：可以是字符串数组或对象数组
+
 #### Step 3: 写入 review-summary.json
 
 全部包审完后（或增量模式下合并已有结果），写入顶层 summary：
@@ -144,6 +177,25 @@ permission:
 - `packageResults`：每个包的摘要（packageName, passed, score, mustFixCount）
 - `totalMustFix`：所有包的 mustFix 总数
 - `totalTodosRemaining`：所有包的 TODO 残留总数
+
+完整示例：
+
+```json
+{
+  "allPassed": false,
+  "packageResults": [
+    { "packageName": "PKG_ORDER", "passed": false, "score": 72, "mustFixCount": 1 },
+    { "packageName": "PKG_UTIL", "passed": true, "score": 95, "mustFixCount": 0 }
+  ],
+  "totalMustFix": 1,
+  "totalTodosRemaining": 3
+}
+```
+
+**关键字段说明**：
+- `allPassed=true` 当且仅当所有 `packageResults[].passed=true`，否则 `allPassed=false`
+- `mustFixCount`：该包 `mustFix` 数组长度
+- `score`：该包 `overallScore` 值
 
 **增量 summary 合并**：增量模式下，读取未修改包的已有 review.json，与本次新审查的包结果合并后生成 summary，确保 `allPassed` 反映全部包的真实状态。
 
@@ -227,6 +279,30 @@ cd ${projectRoot} && mvn compile 2>&1
    - `todoRemainingCount`：TODO 残留数
    - `mustFix`：必须修复的问题（编译错误 + MyBatis 校验失败 + H2 schema 校验失败）
 
+   完整示例：
+
+   ```json
+   {
+     "packageName": "PKG_ORDER",
+     "passed": false,
+     "mybatisValidation": {
+       "mapperXmlValid": true,
+       "statementIdsMatch": true,
+       "h2SchemaValid": true,
+       "mapperTestConfigValid": true
+     },
+     "todoRemainingCount": 2,
+     "mustFix": [
+       { "file": "src/main/java/.../OrderServiceImpl.java", "line": 23, "issue": "编译错误：找不到符号 OrderDO" }
+     ]
+   }
+   ```
+
+   **关键字段说明**：
+   - `passed=true` 时 `mustFix` **必须为空数组 `[]`**；`passed=false` 时 `mustFix` **必须非空**
+   - `mybatisValidation` 四个字段：`mapperXmlValid` 和 `statementIdsMatch` 必填，`h2SchemaValid` 和 `mapperTestConfigValid` 可选
+   - `mustFix[].line`：可选，无法确定行号时写 `null`
+
 #### Step 4: 执行测试
 
 运行 Maven 测试并收集结果：
@@ -262,6 +338,49 @@ cd ${projectRoot} && mvn test 2>&1
 - `testExecution`：{ executed, totalTests, passedTests, failedTests, testErrors[], testFiles[] }
 - `totalTodosRemaining`：所有包的 TODO 残留总数
 - `unresolvedIssues`：未解决的问题列表
+
+完整示例：
+
+```json
+{
+  "allPassed": false,
+  "compilation": {
+    "success": false,
+    "errors": [
+      { "file": "src/main/java/.../OrderServiceImpl.java", "line": 23, "message": "找不到符号 OrderDO" }
+    ]
+  },
+  "packageResults": [
+    { "packageName": "PKG_ORDER", "passed": false, "mybatisValid": true },
+    { "packageName": "PKG_UTIL", "passed": true, "mybatisValid": true }
+  ],
+  "testExecution": {
+    "executed": true,
+    "totalTests": 12,
+    "passedTests": 10,
+    "failedTests": 2,
+    "testErrors": [
+      { "testClass": "OrderServiceImplTest", "testMethod": "createOrder_shouldComplete", "message": "AssertionError: expected 200 but was 404", "testType": "unit" },
+      { "testClass": "OrderMapperIntegrationTest", "testMethod": "selectById_shouldReturnOrder", "message": "EmptyResultDataAccessException", "testType": "integration" }
+    ],
+    "testFiles": [
+      "src/test/java/.../OrderServiceImplTest.java",
+      "src/test/java/.../OrderMapperIntegrationTest.java"
+    ]
+  },
+  "totalTodosRemaining": 3,
+  "unresolvedIssues": [
+    { "packageName": "PKG_ORDER", "issue": "编译错误：OrderDO 类缺失 import" }
+  ]
+}
+```
+
+**关键字段说明**：
+- `compilation.success=false` 时 `errors` **必须存在**（空数组 `[]` 也可通过）
+- `testExecution` 为必填字段
+- `testErrors[].testType`：`"unit"`（ServiceImpl 单元测试）或 `"integration"`（Mapper 集成测试）
+- `testExecution.testFiles[]`：测试文件路径必须实际存在于磁盘
+- `unresolvedIssues`：可选字段
 
 **增量 summary 合并**：增量模式下，读取未修改包的已有 verify.json，与本次新校验的包结果合并后生成 summary。
 

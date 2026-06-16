@@ -100,6 +100,13 @@ function checkAllInstalled(opencodeDir: string, deps: string[]): boolean {
 
 /** 检测可用的包管理器 */
 function detectPackageManager(): "npm" | "bun" | null {
+  // 优先用当前运行时的 execPath（opencode 打包 exe 内嵌 bun，
+  // process.execPath 指向 bun 可执行文件）
+  try {
+    execSync(`"${process.execPath}" --version`, { stdio: "pipe" })
+    return "bun"
+  } catch {}
+  // 回退到系统 PATH
   try { execSync("npm --version", { stdio: "pipe" }); return "npm" } catch {}
   try { execSync("bun --version", { stdio: "pipe" }); return "bun" } catch {}
   return null
@@ -107,9 +114,13 @@ function detectPackageManager(): "npm" | "bun" | null {
 
 /** 执行安装 */
 function runInstall(opencodeDir: string, pm: "npm" | "bun"): void {
-  const cmd = pm === "npm"
-    ? (existsSync(join(opencodeDir, "package-lock.json")) ? "npm ci" : "npm install")
-    : "bun install"
+  let cmd: string
+  if (pm === "npm") {
+    cmd = existsSync(join(opencodeDir, "package-lock.json")) ? "npm ci" : "npm install"
+  } else {
+    // 用 process.execPath 替代 bare "bun"，确保打包 exe 环境可找到
+    cmd = `"${process.execPath}" install`
+  }
 
   execSync(cmd, {
     cwd: opencodeDir,
@@ -142,7 +153,7 @@ export async function ensureDeps(): Promise<void> {
       const pm = detectPackageManager()
       if (!pm) {
         throw new Error(
-          "[ensure-deps] 未找到 npm 或 bun。请安装 Node.js (https://nodejs.org/) 或 Bun (https://bun.sh/)"
+          "[ensure-deps] 未找到可用的包管理器。当前运行时 (process.execPath) 和系统 PATH 中均无 npm/bun。"
         )
       }
 

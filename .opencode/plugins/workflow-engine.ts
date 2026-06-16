@@ -1016,6 +1016,23 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           args: { action: { type: "string" } },
           execute: async () => "❌ 工作流引擎依赖未安装。请手动执行：cd .opencode && npm install",
         },
+        // wfutil 不依赖 zod/plugin，即使 depsOk=false 也应可用
+        wfutil: {
+          description: "Workflow file utility (stub — deps missing)",
+          args: { command: { type: "string" }, args: { type: "array", items: { type: "string" } } },
+          execute: async (input: any) => {
+            const opencodeDir = findOpencodeDir()
+            const wfutilPath = join(opencodeDir, "workflow", "wf-util.js")
+            if (!existsSync(wfutilPath)) return `❌ wf-util.js not found at ${wfutilPath}`
+            try {
+              delete require.cache[require.resolve(wfutilPath)]
+              const wfutil = require(wfutilPath) as { runCommand: (cmd: string, args: string[]) => string }
+              return wfutil.runCommand(input.command, input.args ?? []) || "(no output)"
+            } catch (e: any) {
+              return `❌ wfutil ${input.command} error: ${e.message}`
+            }
+          },
+        },
       },
     }
   }
@@ -1072,7 +1089,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               return {
                 title: "Error",
                 output: `❌ ${e.message}`,
-                metadata: { runId },
+                metadata: { runId, dispatch: false },
               }
             }
             const metadata: Record<string, unknown> = {}
@@ -1087,7 +1104,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 return {
                   title: "Resumed",
                   output: `${runId} | ${existing.currentPhase} | ${existing.status}`,
-                  metadata: { runId, resumed: true },
+                  metadata: { runId, resumed: true, nextAction: "dispatch" },
                 }
               }
             } catch (e: any) {
@@ -1099,7 +1116,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 return {
                   title: "Error",
                   output: `无法加载已有 run ${runId}: ${e.message}`,
-                  metadata: { runId, error: e.message },
+                  metadata: { runId, error: e.message, dispatch: false },
                 }
               }
             }
@@ -1126,7 +1143,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 return {
                   title: "Schema Error",
                   output: hint,
-                  metadata: { runId, error: e.message },
+                  metadata: { runId, error: e.message, dispatch: false },
                 }
               }
 
@@ -1139,7 +1156,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   return {
                     title: "Schema Error",
                     output: fetchResult.error,
-                    metadata: { runId, error: fetchResult.error },
+                    metadata: { runId, error: fetchResult.error, dispatch: false },
                   }
                 }
                 if (fetchResult.fetched && fetchResult.result) {
@@ -1152,7 +1169,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 return {
                   title: "Schema Error",
                   output: `Schema 获取失败: ${e.message}`,
-                  metadata: { runId, error: e.message },
+                  metadata: { runId, error: e.message, dispatch: false },
                 }
               }
             }
@@ -1181,7 +1198,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   return {
                     title: "Empty Source",
                     output: `源码目录 "${args.sourcePath}" 未找到任何可处理的 PL/SQL 对象（package、table、trigger、standalone procedure）。请确认目录下包含 .sql/.pks/.pkb/.pls 文件。`,
-                    metadata: { runId, error: "empty_source" },
+                    metadata: { runId, error: "empty_source", dispatch: false },
                   }
                 }
 
@@ -1194,7 +1211,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 return {
                   title: "Scan Error",
                   output: `源码扫描失败: ${e.message}`,
-                  metadata: { runId, error: e.message },
+                  metadata: { runId, error: e.message, dispatch: false },
                 }
               }
             }
@@ -1231,7 +1248,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   return {
                     title: "Error",
                     output: `无法加载 run ${runId}: ${e.message}`,
-                    metadata: { runId, error: e.message },
+                    metadata: { runId, error: e.message, dispatch: false },
                   }
                 }
               }
@@ -1417,7 +1434,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               return {
                 title: "Invalid Action",
                 output: `⚠️ fixContinue 仅在 fix 循环耗尽（status=completed_with_issues）时可用。当前状态：status=${actualStatus}, phase=${currentPhase}。\n\n请根据当前状态选择正确的操作：\n- 当前阶段已完成 → workflow({ action: "advance", runId: "${args.runId}", result: "passed" 或 "failed" })\n- fix 失败但未耗尽 → workflow({ action: "retry", runId: "${args.runId}" })\n- fix 循环耗尽后才可 → workflow({ action: "fixContinue", runId: "${args.runId}" })`,
-                metadata: { runId: args.runId, error: "invalid_state", actualStatus },
+                metadata: { runId: args.runId, error: "invalid_state", actualStatus, dispatch: false },
               }
             }
             const r = engine.fixContinue(args.runId)
@@ -1497,7 +1514,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             return {
               title: "Aborted",
               output: r.status,
-              metadata: { status: r.status },
+              metadata: { status: r.status, dispatch: false },
             }
           }
 
@@ -1511,12 +1528,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   runs
                     .map((r: any) => `${r.runId}|${r.status}|${r.currentPhase}`)
                     .join("\n") || "No runs",
-                metadata: { count: runs.length },
+                metadata: { count: runs.length, dispatch: false },
               }
             }
             const r = engine.status(args.runId)
             if (!r)
-              return { title: "Not found", output: "No such run", metadata: {} }
+              return { title: "Not found", output: "No such run", metadata: { dispatch: false } }
             // ── Metrics: 附加实时 metrics 快照（仅当 runId 匹配时） ──
             const liveMetrics = activeCollector && activeCollector.runId === args.runId
               ? activeCollector.getSnapshot()
@@ -1538,7 +1555,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 null,
                 2
               ),
-              metadata: { runId: r.runId, ...(liveMetrics ? { liveMetrics } : {}) },
+              metadata: { runId: r.runId, ...(liveMetrics ? { liveMetrics } : {}), dispatch: false },
             }
           }
 
@@ -1551,7 +1568,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 runs
                   .map((r: any) => `${r.runId}|${r.status}|${r.currentPhase}`)
                   .join("\n") || "No runs",
-              metadata: { count: runs.length },
+              metadata: { count: runs.length, dispatch: false },
             }
           }
 
@@ -1559,7 +1576,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           case "prerequisites": {
             // 校验指定阶段的前置 artifact 是否满足（支持 OR-group）
             if (!args.phases) {
-              return { title: "Error", output: "phases parameter required", metadata: {} }
+              return { title: "Error", output: "phases parameter required", metadata: { dispatch: false } }
             }
             // 找到最近的 run 对应的 artifacts 目录
             const runs = engine.listRuns()
@@ -1568,7 +1585,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               b.updatedAt.localeCompare(a.updatedAt)
             )[0]
             if (!latestRun) {
-              return { title: "Error", output: "No workflow runs found", metadata: {} }
+              return { title: "Error", output: "No workflow runs found", metadata: { dispatch: false } }
             }
             const artifactsDir = join(ARTIFACT_DIR, latestRun.runId)
             const targetPhases = args.phases.split(",").map((p: string) => p.trim())
@@ -1577,13 +1594,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               return {
                 title: "Prerequisites Missing",
                 output: `Missing prerequisites for phases [${targetPhases.join(", ")}]:\n${missing.map(m => `  - ${m}`).join("\n")}`,
-                metadata: { missing, phases: targetPhases },
+                metadata: { missing, phases: targetPhases, dispatch: false },
               }
             }
             return {
               title: "Prerequisites OK",
               output: `All prerequisites satisfied for phases: ${targetPhases.join(", ")}`,
-              metadata: { phases: targetPhases },
+              metadata: { phases: targetPhases, dispatch: false },
             }
           }
 
@@ -1595,7 +1612,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               return {
                 title: "No Runs",
                 output: "No workflow runs found. Start with /sql2java <path>",
-                metadata: { resumeStrategy: "no_runs" },
+                metadata: { resumeStrategy: "no_runs", dispatch: false },
               }
             }
 
@@ -1612,7 +1629,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               return {
                 title: "Corrupted Run",
                 output: `Latest run ${latestRun.runId} is corrupted: ${e.message}\nConsider starting a new run with /sql2java <path>`,
-                metadata: { resumeStrategy: "corrupted", runId: latestRun.runId },
+                metadata: { resumeStrategy: "corrupted", runId: latestRun.runId, dispatch: false },
               }
             }
 
@@ -1629,6 +1646,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   status: run.status,
                   resumeStrategy: "already_completed",
                   message: "Workflow already completed",
+                  dispatch: false,
                 },
               }
             }
@@ -1649,6 +1667,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   status: run.status,
                   resumeStrategy: "already_completed",
                   message: "Workflow completed with issues",
+                  dispatch: false,
                 },
               }
             }
@@ -1669,6 +1688,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                     currentPhase: run.currentPhase,
                     resumeStrategy: "confirm_needed",
                     message: `Paused at ${run.currentPhase}. Awaiting confirmation.`,
+                    dispatch: false,
                   },
                 }
               }
@@ -1689,13 +1709,14 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                     currentPhase: confirmed.currentPhase,
                     resumeStrategy: "continue_phase",
                     message: `Auto-confirmed ${run.currentPhase}, continuing at ${confirmedPhase}`,
+                    nextAction: "dispatch",
                   },
                 }
               } catch (e: any) {
                 return {
                   title: "Resume Failed",
                   output: `Failed to auto-confirm paused run ${runId}: ${e.message}`,
-                  metadata: { resumeStrategy: "corrupted", runId },
+                  metadata: { resumeStrategy: "corrupted", runId, dispatch: false },
                 }
               }
             }
@@ -1712,6 +1733,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   currentPhase: run.currentPhase,
                   resumeStrategy: "restart_phase",
                   message: `Run was aborted at ${run.currentPhase}. Manual decision required.`,
+                  dispatch: false,
                 },
               }
             }
@@ -1771,6 +1793,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   resumeStrategy: strategy,
                   skippedPackages,
                   message: `Running at ${run.currentPhase}. ${strategy === "continue_phase" ? "Continue from checkpoint." : "Restart phase."}`,
+                  nextAction: "dispatch",
                 },
               }
             }
@@ -1779,7 +1802,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             return {
               title: "Unknown State",
               output: `Run ${runId} is in unexpected state. Status: ${run.status}, Phase: ${run.currentPhase}`,
-              metadata: { runId, status: run.status, resumeStrategy: "corrupted" },
+              metadata: { runId, status: run.status, resumeStrategy: "corrupted", dispatch: false },
             }
           }
 
@@ -1987,6 +2010,40 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         return `✅ saved: ${args.path} (${sizeKB} KB)`
       },
     }),
+  },
+
+  // ── Tool: wfutil — 工作流文件操作工具集（进程内执行，不依赖系统 bun/node） ──
+  // 替代原 prompt 中 `bun .opencode/workflow/wf-util.js <cmd>` 的 bash 子进程调用，
+  // 解决 Windows 打包 exe 环境下系统 PATH 无 bun/node 的问题。
+  wfutil: toolFn({
+    description:
+      "Workflow file utility commands (mkdir/count-json/list-json/find-json/exists/timestamp/init-analysis-packages/grep-calls/validate-fsd/check-stubs). " +
+      "Runs in-process — no bash/exec, works without bun/node on PATH.",
+    args: {
+      command: zFn.enum([
+        "mkdir", "count-json", "list-json", "find-json",
+        "exists", "timestamp", "init-analysis-packages",
+        "grep-calls", "validate-fsd", "check-stubs",
+      ]),
+      args: zFn.array(zFn.string()).optional().default([]),
+    },
+    execute: async (input: any) => {
+      const opencodeDir = findOpencodeDir()
+      const wfutilPath = join(opencodeDir, "workflow", "wf-util.js")
+      if (!existsSync(wfutilPath)) {
+        return `❌ wf-util.js not found at ${wfutilPath}`
+      }
+      try {
+        // 清除 require 缓存，确保拿到最新代码（开发时文件可能被修改）
+        delete require.cache[require.resolve(wfutilPath)]
+        const wfutil = require(wfutilPath) as { runCommand: (cmd: string, args: string[]) => string }
+        const result = wfutil.runCommand(input.command, input.args ?? [])
+        return result || "(no output)"
+      } catch (e: any) {
+        return `❌ wfutil ${input.command} error: ${e.message}`
+      }
+    },
+  }),
   },
 
   // ── Hook: tool.execute.after — 大输出截断 ──
