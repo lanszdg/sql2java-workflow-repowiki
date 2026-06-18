@@ -48,7 +48,7 @@ function setupOverloadedUtilPkg(dir: string) {
   })
 }
 
-describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", () => {
+describe("validateCrossSchema — callGraph refName 校验 (inventory 阶段)", () => {
   let ctx: ReturnType<typeof createEngineWithTempDir>
   afterEach(() => ctx?.cleanup())
 
@@ -62,7 +62,7 @@ describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", ()
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })
 
-    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("inventory"), "inventory")
     const bare = findings.find((f) => f.message.includes("callGraph") && f.message.includes("get_by_id") && f.message.includes("不在"))
     expect(bare, `应告警裸名撞重载，实际 findings:\n${findings.map(f => f.message).join("\n")}`).toBeTruthy()
     // callGraph refName 问题应为 warning 级别
@@ -80,7 +80,7 @@ describe("validateCrossSchema — callGraph refName 校验 (analyze 阶段)", ()
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })
 
-    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("analyze"), "analyze")
+    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(makeRun("inventory"), "inventory")
     expect(findings.some((f) => f.message.includes("不在") && f.message.includes("refName"))).toBe(false)
   })
 })
@@ -165,11 +165,11 @@ describe("validateCrossSchema — subprogramMethods 校验 (translate 阶段，t
     expect(findings.some((f) => f.message.includes("重复 oracleName"))).toBe(true)
   })
 
-  it("callGraph 校验不在 translate 触发（仅 analyze），translate 不应报 callGraph refName 问题", () => {
+  it("callGraph 校验不在 translate 触发（仅 inventory），translate 不应报 callGraph refName 问题", () => {
     ctx = createEngineWithTempDir()
     setupOverloadedUtilPkg(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "analysis.json", {
-      callGraph: { "UTIL_PKG.get_by_id": [] },  // 裸名（非法），但 analyze 才校验
+      callGraph: { "UTIL_PKG.get_by_id": [] },  // 裸名（非法），但 inventory 才校验
       packageDependency: {}, translationOrder: [["UTIL_PKG"]],
       complexity: {}, sccGroups: [], packageNames: ["UTIL_PKG"],
     })

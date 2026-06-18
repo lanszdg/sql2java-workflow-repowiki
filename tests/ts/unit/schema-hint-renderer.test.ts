@@ -63,11 +63,13 @@ describe("renderSchemaHint", () => {
     expect(hint).toContain('"info"')
   })
 
-  it("analyze 阶段包含 riskLevel 枚举", () => {
+  it("analyze 阶段不渲染 riskLevel 枚举（complexity.riskLevel 属代码生成的 analysis.json，已从 hint 去掉）", () => {
     const hint = renderSchemaHint("analyze")
-    expect(hint).toContain('"low"')
-    expect(hint).toContain('"medium"')
-    expect(hint).toContain('"high"')
+    // riskLevel 在 AnalysisMetaSchema.complexity（analysis.json，代码生成），非 worker 手写，不渲染
+    expect(hint).not.toContain('"low"')
+    expect(hint).not.toContain('"high"')
+    // 但 per-package 的 subprograms 结构仍渲染
+    expect(hint).toContain("subprograms")
   })
 
   it("plan 阶段 namingConvention 在 pitfall 中有推荐值", () => {
@@ -84,9 +86,12 @@ describe("renderSchemaHint", () => {
 
   // ── Per-Package schema ──
 
-  it("inventory 阶段包含 per-package schema（InventoryPackageSchema）", () => {
+  it("inventory 阶段不渲染 per-package schema（InventoryPackageSchema 由代码生成，worker 不写）", () => {
     const hint = renderSchemaHint("inventory")
-    expect(hint).toContain("inventory-packages/{PKG}.json")
+    // 不渲染 per-package schema 块（注意：字符串 "inventory-packages/{PKG}.json" 仍出现在引擎级校验文字中，故只断言 schema 块头）
+    expect(hint).not.toContain("### Per-Package: inventory-packages/{PKG}.json")
+    // 顶层 inventory.json schema 仍渲染
+    expect(hint).toContain("### inventory.json")
   })
 
   it("analyze 阶段包含 per-package schema（AnalysisPackageSchema）", () => {
@@ -170,9 +175,9 @@ describe("renderSchemaHint", () => {
     expect(hint).toContain("--- 跨 Schema 校验 ---")
   })
 
-  it("inventory 阶段不包含跨 Schema 校验", () => {
+  it("inventory 阶段包含跨 Schema 校验（analysis.json 由 inventory 产出，需校验 callGraph refName）", () => {
     const hint = renderSchemaHint("inventory")
-    expect(hint).not.toContain("--- 跨 Schema 校验 ---")
+    expect(hint).toContain("--- 跨 Schema 校验 ---")
   })
 
   // ── 引擎级校验 ──
@@ -202,9 +207,8 @@ describe("renderSchemaHint", () => {
 
   it("inventory 阶段包含可选字段标记 ?", () => {
     const hint = renderSchemaHint("inventory")
-    // specFile 和 bodyFile 是 optional
-    expect(hint).toContain("specFile?:")
-    expect(hint).toContain("bodyFile?:")
+    // specFile/bodyFile 是 per-package 字段（已不渲染）；顶层 tables[].ddlFile 是 nullable optional
+    expect(hint).toContain("ddlFile?:")
   })
 
   // ── 数字范围 ──
@@ -312,5 +316,44 @@ describe("renderSchemaHint — 常见被拒原因 (COMMON_PITFALLS)", () => {
         }
       }
     }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// 渲染器完整性 — nullable/联合类型/字符串长度不再丢失
+// ═══════════════════════════════════════════════════════════════
+
+describe("renderSchemaHint — 约束完整性（anyOf/nullable/string 长度）", () => {
+  it("verify 阶段 nullable 字段渲染为 'number | null' 而非裸 any", () => {
+    const hint = renderSchemaHint("verify")
+    // totalTests/passedTests/failedTests/line 均为 z.coerce.number().nullable().optional()
+    expect(hint).toContain("number | null")
+  })
+
+  it("review 阶段 nullable 字段渲染为 'number | null'", () => {
+    const hint = renderSchemaHint("review")
+    // line: z.coerce.number().nullable().optional()
+    expect(hint).toContain("number | null")
+  })
+
+  it("fix 阶段 fixedPackages 元素的 minLength 约束保留", () => {
+    const hint = renderSchemaHint("fix")
+    // fixedPackages: z.array(z.string().min(1))
+    expect(hint).toContain("minLen 1")
+  })
+
+  it("analyze 阶段不渲染顶层 analysis.json schema（代码生成）", () => {
+    const hint = renderSchemaHint("analyze")
+    expect(hint).not.toMatch(/###\s*analysis\.json/)
+  })
+
+  it("analyze 阶段保留 per-package analysis-packages schema（worker 手写）", () => {
+    const hint = renderSchemaHint("analyze")
+    expect(hint).toContain("analysis-packages/{pkg}.json")
+  })
+
+  it("inventory 阶段顶层 schema 仍渲染", () => {
+    const hint = renderSchemaHint("inventory")
+    expect(hint).toContain("### inventory.json")
   })
 })

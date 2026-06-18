@@ -474,8 +474,10 @@ describe("getPerPackageSchema", () => {
     expect(getPerPackageSchema("review")).not.toBeNull()
   })
 
-  it("verify 返回 VerifySchema", () => {
-    expect(getPerPackageSchema("verify")).not.toBeNull()
+  it("verify 不再 per-package（动态结果落 verify-summary.json）", () => {
+    // verify 静态检查归 review，动态检查（mvn + 归因）由 generateVerifySummary 代码聚合到
+    // verify-summary.json；不再产 per-package verify.json。
+    expect(getPerPackageSchema("verify")).toBeNull()
   })
 
   it("非 per-package 阶段返回 null", () => {

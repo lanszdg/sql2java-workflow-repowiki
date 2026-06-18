@@ -62,8 +62,9 @@ describe("SQL2JAVA_WORKFLOW phases", () => {
 
   it("needsCrossSchemaValidation 的阶段正确", () => {
     const crossSchemaPhases = phases.filter(p => p.needsCrossSchemaValidation).map(p => p.name)
+    // inventory：analysis.json（含 callGraph）由 inventory 阶段代码产出，需校验 refName 合法性 + 包名一致
     // translate 完成时所有包 translation.json 已齐，即时校验 subprogramMethods 给 translator 反馈
-    expect(crossSchemaPhases.sort()).toEqual(["analyze", "dedup", "plan", "translate"])
+    expect(crossSchemaPhases.sort()).toEqual(["analyze", "dedup", "inventory", "plan", "translate"])
   })
 })
 

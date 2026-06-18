@@ -687,10 +687,11 @@ export function getInventoryPackageSchema(): ZodType {
 
 /** 根据阶段名查找 per-package schema */
 export function getPerPackageSchema(phase: string): ZodType | null {
+  // verify 不再产 per-package verify.json——静态检查归 review，动态结果（编译/测试归因）
+  // 落在 verify-summary.json.packageResults。VerifySchema 保留定义备查但不再用于逐包校验。
   const schemaMap: Record<string, ZodType> = {
     translate: TranslationSchema,
     review: ReviewSchema,
-    verify: VerifySchema,
   }
   return schemaMap[phase] ?? null
 }

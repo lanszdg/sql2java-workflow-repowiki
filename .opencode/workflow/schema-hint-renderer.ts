@@ -18,7 +18,7 @@ import { toJSONSchema } from "zod/v4/core"
 import type { ZodType } from "zod"
 import {
   getSchemaForPhase, getPerPackageSchema, getSummarySchema,
-  getArtifactFilename, getInventoryPackageSchema, getAnalysisPackageSchema,
+  getArtifactFilename, getAnalysisPackageSchema,
 } from "./artifact-schemas"
 import {
   REFINE_CONSTRAINTS, NON_ZOD_VALIDATION_RULES,
@@ -43,12 +43,24 @@ const MAX_DEPTH = 5
 function jsonSchemaToCompactText(schema: Record<string, unknown>, indent = 0, depth = 0): string {
   const pad = "  ".repeat(indent)
 
+  // ── 联合类型（anyOf/oneOf）── 必须在 type 分支之前判断：z.nullable()/z.union()/
+  // discriminatedUnion 在 toJSONSchema 中产出 anyOf（顶层无 type），否则会穿透到回退 any。
+  if (schema.anyOf || schema.oneOf) {
+    const subs = (schema.anyOf ?? schema.oneOf) as Record<string, unknown>[]
+    const parts = subs.map(s => jsonSchemaToCompactText(s, indent, depth))
+    return parts.join(" | ")
+  }
+
   // ── 基本类型 ──
   if (schema.type === "string") {
     if (schema.enum && Array.isArray(schema.enum)) {
       return (schema.enum as string[]).map(v => `"${v}"`).join(" | ")
     }
-    return "string"
+    const c: string[] = []
+    if (schema.minLength !== undefined) c.push(`minLen ${schema.minLength}`)
+    if (schema.maxLength !== undefined) c.push(`maxLen ${schema.maxLength}`)
+    if (typeof schema.pattern === "string") c.push(`/${schema.pattern}/`)
+    return c.length ? `string (${c.join(", ")})` : "string"
   }
   if (schema.type === "boolean") return "boolean"
   if (schema.type === "number" || schema.type === "integer") {
@@ -94,18 +106,10 @@ function jsonSchemaToCompactText(schema: Record<string, unknown>, indent = 0, de
     return `any[]${suffix}`
   }
 
-  // ── Record（JSON Schema: type=object + additionalProperties） ──
-  if (schema.type === "object" && schema.additionalProperties && typeof schema.additionalProperties === "object") {
-    const valueSchema = schema.additionalProperties as Record<string, unknown>
-    const valueText = jsonSchemaToCompactText(valueSchema, indent, depth + 1)
-    // 简单值类型内联
-    if (!valueText.includes("\n") && valueText.length < 60) {
-      return `Record<string, ${valueText}>`
-    }
-    return `Record<string, { ${valueText.trim()} }>`
-  }
-
-  // ── 对象 ──
+  // ── 对象（有显式 properties） ──
+  // 注意：必须在 Record 分支之前判断。z.object(...).passthrough() 在 toJSONSchema 中会同时产出
+  // `properties`（已声明字段）与 `additionalProperties: {}`（允许额外字段）；若先命中 Record 分支，
+  // 已声明字段（含枚举、可选标记）会被整体折叠为 `Record<string, any>`，LLM 拿不到字段级指引。
   if (schema.type === "object" && schema.properties) {
     const props = schema.properties as Record<string, Record<string, unknown>>
     const required = new Set(schema.required as string[] ?? [])
@@ -128,7 +132,22 @@ function jsonSchemaToCompactText(schema: Record<string, unknown>, indent = 0, de
       return `${pad}  ${key}${optional}: ${oneLine}`
     })
 
-    return `{\n${lines.join(",\n")}\n${pad}}`
+    // passthrough（additionalProperties 允许额外字段）时追加提示，不折叠已声明字段
+    const allowsExtras = schema.additionalProperties !== undefined && schema.additionalProperties !== false
+    const suffix = allowsExtras ? "  // + 允许额外字段（.passthrough）" : ""
+    return `{\n${lines.join(",\n")}\n${pad}}${suffix}`
+  }
+
+  // ── Record（JSON Schema: type=object + additionalProperties，无显式 properties） ──
+  // 仅对真正的 z.record(...)（无 properties，只有 additionalProperties）走此分支。
+  if (schema.type === "object" && schema.additionalProperties && typeof schema.additionalProperties === "object") {
+    const valueSchema = schema.additionalProperties as Record<string, unknown>
+    const valueText = jsonSchemaToCompactText(valueSchema, indent, depth + 1)
+    // 简单值类型内联
+    if (!valueText.includes("\n") && valueText.length < 60) {
+      return `Record<string, ${valueText}>`
+    }
+    return `Record<string, { ${valueText.trim()} }>`
   }
 
   // ── 未知/回退 ──
@@ -253,24 +272,21 @@ export function renderSchemaHint(phase: string | null | undefined): string {
   parts.push("")
 
   // ── 顶层 schema ──
+  // analyze 阶段跳过：analysis.json 由 inventory 阶段 generateAnalysis 代码产出（非 worker 手写），
+  // 其格式由 inventory 边界校验 + CROSS_SCHEMA_HINTS.analyze 文字覆盖，不在此渲染。
   const topLevelSchema = getSchemaForPhase(phase)
-  if (topLevelSchema) {
+  if (topLevelSchema && phase !== "analyze") {
     const filename = getArtifactFilename(phase)
     parts.push(`### ${filename}.json`)
     parts.push(renderZodSchema(topLevelSchema))
     parts.push("")
   }
 
-  // ── Per-package schema（inventory/analyze 特殊处理 + 通用 per-package） ──
-  // inventory 阶段：额外有 InventoryPackageSchema
-  if (phase === "inventory") {
-    const invPkgSchema = getInventoryPackageSchema()
-    parts.push("### Per-Package: inventory-packages/{PKG}.json")
-    parts.push(renderZodSchema(invPkgSchema))
-    parts.push("")
-  }
-
-  // analyze 阶段：额外有 AnalysisPackageSchema
+  // ── Per-package schema ──
+  // hint 只渲染 worker 手写的 per-package 产物：
+  //   - analyze：analysis-packages/{pkg}.json（worker 读源码后手写，是本阶段主体产出）
+  //   - inventory 的 inventory-packages/{PKG}.json 由 generateInventory 代码生成（非 worker 手写），
+  //     不渲染——被拒时 workOrder 已注入精确 Zod 报错，无需预载该 schema。
   if (phase === "analyze") {
     const analysisPkgSchema = getAnalysisPackageSchema()
     parts.push("### Per-Package: analysis-packages/{pkg}.json")

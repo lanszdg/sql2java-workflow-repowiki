@@ -20,15 +20,19 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
+      // analysis.json（含 callGraph）现由 inventory 阶段代码产出，需在 inventory advance
+      // 时运行 validateCrossSchema：校验 analysis↔inventory 包名一致 + callGraph refName 合法性。
+      needsCrossSchemaValidation: true,
       tools: ["read", "bash", "write", "workflow"],
     },
     {
       name: "analyze",
-      description: "依赖分析 + 子程序结构解析 + FSD 生成",
+      description: "子程序结构解析 + FSD 生成（分片 map；依赖图 meta 已由 inventory 代码产出）",
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
       needsCrossSchemaValidation: true,
+      maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "workflow"],
     },
     {
@@ -55,7 +59,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       temperature: 0.1,
       maxRetries: 3,
       needsCrossSchemaValidation: true,
-      maxPackagesPerShard: 3,
+      maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "edit", "workflow"],
     },
     {
@@ -69,10 +73,11 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "review",
-      description: "翻译质量审查",
+      description: "翻译质量审查（按包分片，每分片 1 包；summary 由 generateReviewSummary 代码聚合）",
       agentFile: "agent/reviewer.md",
       temperature: 0.1,
       maxRetries: 1,
+      maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "workflow"],
     },
     {
@@ -129,7 +134,7 @@ const _FSD = ["fsd/*/*.md"] as const
 /** 每个 phase 需要读取的上游 artifact 路径模板 */
 export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   inventory: ["inventory-index.json"],
-  analyze: [..._INV_BASE],
+  analyze: [..._INV_BASE, "analysis.json"],
   plan: [..._INV_BASE, ..._ANALYSIS, ..._FSD],
   scaffold: [..._PLAN, ..._INV_BASE],
   translate: [..._INV_BASE, ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD, ..._FSD],
@@ -159,7 +164,7 @@ export type PrerequisiteItem = string | string[]
 
 /** 目标阶段 → 必须存在的 artifact 文件名（string=必须，string[]=OR组） */
 export const PHASE_PREREQUISITES: Record<string, PrerequisiteItem[]> = {
-  analyze: ["inventory-index.json", "inventory.json", "inventory-packages"],
+  analyze: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json"],
   plan: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages"],
   scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages"],
   translate: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages", "plan.json", "scaffold.json"],

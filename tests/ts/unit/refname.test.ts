@@ -40,6 +40,19 @@ describe("refNamesForPackage", () => {
   it("空数组返回空数组", () => {
     expect(refNamesForPackage([])).toEqual([])
   })
+
+  it("大小写变体视为同名重载（PL/SQL 标识符不区分大小写）", () => {
+    // Oracle 默认大写化未加引号的标识符，get_item 与 GET_ITEM 是同一子程序、互为重载。
+    // 须按大写键合并计数，否则 analysis-builder 与 validateCrossSchema 的 validRefNameSet
+    // 会对大小写变体产出不相交的 refName 集合（callGraph 误报「未知 refName」）。
+    expect(refNamesForPackage(["get_item", "GET_ITEM"])).toEqual(["get_item__1", "GET_ITEM__2"])
+    // 混合：唯一名保留裸名（按大写判定唯一），重载名带序号
+    expect(refNamesForPackage(["get_item", "GET_ITEM", "do_thing"])).toEqual([
+      "get_item__1",
+      "GET_ITEM__2",
+      "do_thing",
+    ])
+  })
 })
 
 describe("validRefNameSet", () => {
@@ -54,6 +67,14 @@ describe("validRefNameSet", () => {
 
   it("非重载名裸名在集合内", () => {
     expect(validRefNameSet(["create_order"]).has("CREATE_ORDER")).toBe(true)
+  })
+
+  it("大小写变体重载的合法集合包含全部带序号变体（与 analysis-builder 口径一致）", () => {
+    // analysis-builder.procNameToRefNames 按 toUpperCase 分组，其 refName 大写化后须与此集合一致
+    const set = validRefNameSet(["get_item", "GET_ITEM"])
+    expect(set.has("GET_ITEM__1")).toBe(true)
+    expect(set.has("GET_ITEM__2")).toBe(true)
+    expect(set.has("GET_ITEM")).toBe(false) // 重载名不应有裸名
   })
 })
 
