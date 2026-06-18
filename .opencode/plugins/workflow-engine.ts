@@ -54,11 +54,24 @@ let activeCollector: PhaseMetricsCollector | null = null
 /** 编排 session ID 集合 — chat.params hook 中记录，system.transform hook 中用于跳过编排 session 的 prompt 注入 */
 const orchestratorSessionIds = new Set<string>()
 
-/** 生成 run-YYYYMMDD-HHMMSS 格式的 runId */
-function formatRunId(): string {
+/**
+ * 生成 run-<project>-YYYYMMDD-HHMMSS 格式的 runId。
+ * project 取 sourcePath 的 basename（净化为文件名安全字符），缺失/为空时用 unknown 占位，
+ * 便于在 .workflow-artifacts/ 下按项目区分多次运行。runId 仅作目录名 + 字符串 id，无格式反解析。
+ */
+export function formatRunId(sourcePath?: string): string {
   const d = new Date()
   const pad = (n: number) => String(n).padStart(2, "0")
-  return `run-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  let proj = "unknown"
+  if (sourcePath) {
+    // 取最终路径段（兼容尾部斜杠/反斜杠）
+    const base = sourcePath.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() ?? ""
+    // 净化为文件名安全字符：非 [a-zA-Z0-9_-] → _，折叠连续 _，去首尾 _
+    const sanitized = base.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "")
+    if (sanitized) proj = sanitized
+  }
+  return `run-${proj}-${ts}`
 }
 
 /** 从 agentFile 路径提取 agent 短名 (e.g. "agent/sql-analyst.md" → "sql-analyst") */
@@ -1827,7 +1840,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         switch (args.action) {
           // ── start ──
           case "start": {
-            const runId = args.runId ?? formatRunId()
+            const runId = args.runId ?? formatRunId(args.sourcePath)
             initLogger(runId)
 
             // 加载用户自定义规约（--spec）
