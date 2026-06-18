@@ -127,8 +127,9 @@ permission:
 
 - **分片模式**（`targetPackages` 存在且 `shardIndex` 存在）：
   - **只翻译 `targetPackages` 中列出的包**，不要翻译其他包
+  - **只读取本分片 `targetPackages` 中包的源码和 per-package 文件**（源码路径取自 `inventory-packages/{PKG}.json` 的 specFile/bodyFile），不要读其他包的源码/文件，不要一次性读全部源码
   - 仍按 `translationOrder` 的顺序处理这些包（跳过不在 targetPackages 中的包）
-  - 依赖的已翻译包的 `translation.json` 路径已在 upstreamArtifacts 中给出，直接 `read` 即可
+  - 依赖的已翻译包的 `translation.json` 路径已在 upstreamArtifacts 中给出，直接 `read` 即可（仅限跨包调用对接，不要顺带处理这些包）
   - 不翻译 targetPackages 之外的任何包
 
 - **全量模式**（无 `incrementalContext` 或无 `shardIndex`）：
@@ -140,7 +141,7 @@ permission:
 
 对每个包：
 
-1. **读取 Oracle 源码**：读取 `.pks` 和 `.pkb` 文件
+1. **读取 Oracle 源码**：读取本包的 `.pks` 和 `.pkb` 文件（路径取自 `inventory-packages/{pkg}.json` 的 specFile/bodyFile，只读本包，不要读其他包源码）
 2. **读取子程序结构**：读取 `analysis-packages/{pkg}.json` 获取该包的子程序详情
 3. **逐子程序翻译**：对该包的每个子程序：
    - 参考子程序的 blocks、variables、cursors、exceptionHandlers
