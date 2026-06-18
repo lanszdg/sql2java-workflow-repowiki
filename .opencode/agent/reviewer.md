@@ -112,7 +112,7 @@ permission:
 #### Step 1: 确定审查范围
 
 - **分片 / 增量模式**（Runtime Context `incrementalContext.targetPackages` 存在）：**只审查本分片/增量列出的包**，不要审查其它包，不要一次性读全部源码。每包审完立即写盘。
-- **全量模式**（无 targetPackages）：审查 inventory-index 中的所有包
+- **全量模式**（无 targetPackages）：审查 `inventory.json.packageNames`（或 `analysis.json.packageNames`）中的所有包
 
 #### Step 2: 逐包审查
 

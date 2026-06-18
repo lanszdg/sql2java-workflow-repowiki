@@ -177,6 +177,18 @@ describe("UPSTREAM_ARTIFACTS", () => {
     // fsd/*/*.md 在分片模式下由 narrowUpstreamForShard 收窄到 fsd/{pkg}/*.md
     expect(UPSTREAM_ARTIFACTS.translate).toContain("fsd/*/*.md")
   })
+
+  it("inventory-index.json 仅 inventory 阶段注入；其余下游阶段都不读它", () => {
+    // inventory-index 是预扫描源，仅 inventory 阶段代码生成 + 边界校验消费；下游 worker
+    // 读精炼后的 inventory.json / inventory-packages / analysis.json 即可。
+    for (const [phase, artifacts] of Object.entries(UPSTREAM_ARTIFACTS)) {
+      if (phase === "inventory") {
+        expect(artifacts, "inventory 阶段读 inventory-index.json").toContain("inventory-index.json")
+      } else {
+        expect(artifacts, `${phase} 不应注入 inventory-index.json`).not.toContain("inventory-index.json")
+      }
+    }
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════
