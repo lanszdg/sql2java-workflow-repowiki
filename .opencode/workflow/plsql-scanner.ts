@@ -1019,50 +1019,43 @@ function regexFallbackForFile(
     // DDL 文件：table/trigger/view/sequence/standalone proc
 
     // CREATE TABLE
-    const tableMatch = code.match(/CREATE\s+TABLE\s+(\w+)/i)
-    if (tableMatch) {
-      tables.push({ name: tableMatch[1].toUpperCase(), ddlFile: relPath })
+    for (const m of code.matchAll(/CREATE\s+TABLE\s+(\w+)/gi)) {
+      tables.push({ name: m[1].toUpperCase(), ddlFile: relPath })
     }
 
     // CREATE TRIGGER
-    const triggerMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+(\w+)/i)
-    if (triggerMatch) {
-      triggers.push({ name: triggerMatch[2].toUpperCase(), sourceFile: relPath })
+    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+(\w+)/gi)) {
+      triggers.push({ name: m[2].toUpperCase(), sourceFile: relPath })
     }
 
     // CREATE VIEW
-    const viewMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/i)
-    if (viewMatch) {
-      views.push({ name: viewMatch[2].toUpperCase(), ddlFile: relPath })
+    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/gi)) {
+      views.push({ name: m[2].toUpperCase(), ddlFile: relPath })
     }
 
     // CREATE SEQUENCE
-    const seqMatch = code.match(/CREATE\s+SEQUENCE\s+(\w+)/i)
-    if (seqMatch) {
-      sequences.push({ name: seqMatch[1].toUpperCase(), ddlFile: relPath })
+    for (const m of code.matchAll(/CREATE\s+SEQUENCE\s+(\w+)/gi)) {
+      sequences.push({ name: m[1].toUpperCase(), ddlFile: relPath })
     }
 
-    // Standalone procedure/function
-    const procMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\s+(\w+)/i)
-    if (procMatch) {
+    // Standalone procedure/function（一个 .sql 文件可能定义多个，必须 matchAll 全量提取）
+    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\s+(\w+)/gi)) {
       standaloneProcedures.push({
-        name: procMatch[2].toLowerCase(),
+        name: m[2].toLowerCase(),
         type: "procedure",
         sourceFile: relPath,
       })
     }
-    const funcMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)/i)
-    if (funcMatch) {
+    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)/gi)) {
       standaloneProcedures.push({
-        name: funcMatch[2].toLowerCase(),
+        name: m[2].toLowerCase(),
         type: "function",
         sourceFile: relPath,
       })
     }
 
     // .sql 文件也可能是 package spec/body（某些项目规范）
-    const pkgSpecMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\s+)(\w+)/i)
-    if (pkgSpecMatch) {
+    for (const pkgSpecMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\s+)(\w+)/gi)) {
       const name = pkgSpecMatch[2].toUpperCase()
       const existing = packages.get(name) ?? {
         name,
@@ -1076,8 +1069,7 @@ function regexFallbackForFile(
       regexExtractProcedures(lines, existing)
       packages.set(name, existing)
     }
-    const pkgBodyMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(\w+)/i)
-    if (pkgBodyMatch) {
+    for (const pkgBodyMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(\w+)/gi)) {
       const name = pkgBodyMatch[2].toUpperCase()
       const existing = packages.get(name) ?? {
         name,
@@ -1119,16 +1111,57 @@ function regexExtractProcedures(lines: string[], pkg: PackageIndex): void {
   }
 }
 
+/**
+ * 剥离 PL/SQL 块注释（斜杠星 ... 星斜杠），保留换行以维持行号。
+ * 单行内可能有多个注释、或注释跨行；非注释内容原样保留。
+ * 不处理字符串字面量内的注释起始符（极少见；单引号字符串在 depth 计数时另行剥离）。
+ */
+function stripBlockComments(lines: string[]): string[] {
+  let inBlock = false
+  return lines.map(line => {
+    let out = ""
+    let i = 0
+    while (i < line.length) {
+      if (inBlock) {
+        const end = line.indexOf("*/", i)
+        if (end === -1) return out
+        inBlock = false
+        i = end + 2
+      } else {
+        const start = line.indexOf("/*", i)
+        if (start === -1) {
+          out += line.slice(i)
+          break
+        }
+        out += line.slice(i, start)
+        i = start + 2
+        inBlock = true
+      }
+    }
+    return out
+  })
+}
+
 /** 从 body 文件提取 procedure/function 实现及行号范围 */
 function regexExtractProceduresFromBody(lines: string[], pkg: PackageIndex): void {
-  let currentProc: { name: string; type: "procedure" | "function"; startLine: number } | null = null
-  let depth = 0
+  // 预剥离跨行块注释，避免注释里的 BEGIN/END 污染 depth 计数导致过程边界错乱
+  lines = stripBlockComments(lines)
+  // 过程嵌套栈：PL/SQL 允许在过程内定义局部过程/函数。若用单一 currentProc，
+  // 遇到内层 PROCEDURE 会提前关闭外层，导致外层 lineRange 截断在内层定义处、
+  // 内层之后的代码丢失。改用栈，每帧带独立 depth：内层 BEGIN/END 只作用于栈顶，
+  // 不会让外层误判结束。只有顶层过程（isTop=true）登记进 pkg.procedures；
+  // 局部过程不单独登记，其代码包含在父过程 lineRange 内，下游切片得到完整外层过程。
+  type Frame = { name: string; type: "procedure" | "function"; startLine: number; depth: number; isTop: boolean }
+  const stack: Frame[] = []
 
-  /** 向后搜索最多 maxLines 行，检查是否包含 IS/AS（表示有实现体） */
+  /**
+   * 向后扫描检查是否包含 IS/AS（表示有实现体）。
+   * 不设行数上限——超长参数列表可能跨越数十行，硬上限会让整个过程被跳过。
+   * 遇到下一个 PROCEDURE/FUNCTION/END/CREATE 即判定为非实现体（纯声明）并停止。
+   */
   function hasBodyKeyword(startIdx: number): boolean {
-    const maxLines = 20
     let inTypeDecl = false  // 跟踪跨行 TYPE 声明
-    for (let j = startIdx; j < Math.min(startIdx + maxLines, lines.length); j++) {
+    for (let j = startIdx; j < lines.length; j++) {
       const l = lines[j].trim()
       if (l.startsWith("--")) continue
       // 跟踪跨行 TYPE 声明（TYPE xxx 开头但 IS/AS 在后续行）
@@ -1160,51 +1193,54 @@ function regexExtractProceduresFromBody(lines: string[], pkg: PackageIndex): voi
     // 检测 procedure/function 开始（支持无参过程如 PROCEDURE init IS）
     const procMatch = line.match(/^\s*(PROCEDURE|FUNCTION)\s+(\w+)\s*[\(\w]/i)
     // 排除仅声明但无实现体的情况（如 TYPE ... IS RECORD）
-    // 支持多行签名：IS/AS 可能在后续行（最多 20 行内）
+    // 支持多行签名：IS/AS 可能在后续行（hasBodyKeyword 扫到下一个过程/END 为止）
     if (procMatch && !line.match(/^\s*--/)) {
       const hasIsOrAs = /\b(IS|AS)\b/i.test(line)
       const hasBodyElsewhere = !hasIsOrAs && hasBodyKeyword(i + 1)
 
       if (hasIsOrAs || hasBodyElsewhere) {
-        // 如果之前有未结束的 procedure，先关闭它
-        if (currentProc) {
-          updateProcedureLineRange(pkg, currentProc.name, currentProc.startLine, i)
-        }
         const procType = procMatch[1].toUpperCase() === "PROCEDURE" ? "procedure" : "function"
-        currentProc = {
+        // 栈空 → 顶层过程；栈非空 → 局部过程（嵌套在父过程内，不单独登记）
+        stack.push({
           name: procMatch[2].toLowerCase(),
           type: procType,
           startLine: i + 1,
-        }
-        depth = 0
+          depth: 0,
+          isTop: stack.length === 0,
+        })
       }
     }
 
-    // 追踪 BEGIN/END 深度来定位结束行
+    // 追踪 BEGIN/END 深度来定位结束行（仅作用于栈顶过程）
     // 注意：END IF / END LOOP / END CASE 不是块结束，需要排除
-    if (currentProc) {
+    if (stack.length > 0) {
+      const top = stack[stack.length - 1]
       // 移除字符串字面量和行内注释，避免误匹配 'END' / "BEGIN" 等
       const codeOnly = line.replace(/'[^']*'/g, "")   // 单引号字符串
         .replace(/--.*$/, "")                          // 行尾注释（前面已跳过纯注释行，但行内注释仍需处理）
       const begins = (codeOnly.match(/\bBEGIN\b/gi) || []).length
       // 排除 END IF / END LOOP / END CASE 等非块结束的 END
       const ends = (codeOnly.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
-      depth += begins - ends
-      // 仅当 depth 严格递减到 0 且原始行含真实 END（排除 END IF/LOOP/CASE）时关闭过程
-      if (depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
-        updateProcedureLineRange(pkg, currentProc.name, currentProc.startLine, i + 1, currentProc.type)
-        currentProc = null
-        depth = 0
-      } else if (depth < 0) {
+      top.depth += begins - ends
+      // 仅当栈顶 depth 归零且该行含真实 END（排除 END IF/LOOP/CASE）时，栈顶过程结束
+      if (top.depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
+        const frame = stack.pop()
+        // 只有顶层过程登记 lineRange；局部过程的代码已包含在父过程 lineRange 内
+        if (frame && frame.isTop) {
+          updateProcedureLineRange(pkg, frame.name, frame.startLine, i + 1, frame.type)
+        }
+      } else if (top.depth < 0) {
         // 防御性重置：depth 不应为负（可能是未过滤的边缘情况），归零避免后续误判
-        depth = 0
+        top.depth = 0
       }
     }
   }
 
-  // 处理未关闭的（文件结尾）
-  if (currentProc) {
-    updateProcedureLineRange(pkg, currentProc.name, currentProc.startLine, lines.length, currentProc.type)
+  // 处理未关闭的顶层过程（文件结尾）
+  for (const frame of stack) {
+    if (frame.isTop) {
+      updateProcedureLineRange(pkg, frame.name, frame.startLine, lines.length, frame.type)
+    }
   }
 }
 
