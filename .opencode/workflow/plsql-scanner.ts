@@ -303,11 +303,13 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
     }
   }
 
+  const pkgList = Array.from(packages.values())
+  injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
   return {
     sourcePath,
     scannedAt: new Date().toISOString(),
     scannerUsed: "ast",
-    packages: Array.from(packages.values()),
+    packages: pkgList,
     tables,
     triggers,
     views,
@@ -948,11 +950,13 @@ export function scanWithRegex(sourcePath: string): InventoryIndex {
     regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
   }
 
+  const pkgList = Array.from(packages.values())
+  injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
   return {
     sourcePath,
     scannedAt: new Date().toISOString(),
     scannerUsed: "regex",
-    packages: Array.from(packages.values()),
+    packages: pkgList,
     tables,
     triggers,
     views,
@@ -1038,21 +1042,8 @@ function regexFallbackForFile(
       sequences.push({ name: m[1].toUpperCase(), ddlFile: relPath })
     }
 
-    // Standalone procedure/function（一个 .sql 文件可能定义多个，必须 matchAll 全量提取）
-    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\s+(\w+)/gi)) {
-      standaloneProcedures.push({
-        name: m[2].toLowerCase(),
-        type: "procedure",
-        sourceFile: relPath,
-      })
-    }
-    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)/gi)) {
-      standaloneProcedures.push({
-        name: m[2].toLowerCase(),
-        type: "function",
-        sourceFile: relPath,
-      })
-    }
+    // Standalone procedure/function（含 lineRange，复用 BEGIN/END 栈；一个 .sql 可定义多个）
+    regexExtractStandaloneProcs(code, relPath, standaloneProcedures)
 
     // .sql 文件也可能是 package spec/body（某些项目规范）
     for (const pkgSpecMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\s+)(\w+)/gi)) {
@@ -1257,6 +1248,99 @@ function updateProcedureLineRange(
     existing.lineRange = [startLine, endLine]
   } else {
     pkg.procedures.push({ name: procName, type: type ?? "procedure", lineRange: [startLine, endLine] })
+  }
+}
+
+/**
+ * 从 startIdx（0-based）起，用 BEGIN/END 嵌套栈算独立过程的结束行（1-based）。
+ * 复用 regexExtractProceduresFromBody 同款 depth 计数：排除 END IF/LOOP/CASE，
+ * 剥离单引号串与行内注释；栈深度归零且该行含真实 END 即结束。
+ * sawBegin 守卫确保只在过程体 BEGIN 之后才判断结束，避免签名区误判。
+ */
+function findProcEndLine(lines: string[], startIdx: number): number | undefined {
+  let depth = 0
+  let sawBegin = false
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (line.startsWith("--")) continue
+    const codeOnly = line.replace(/'[^']*'/g, "").replace(/--.*$/, "")
+    const begins = (codeOnly.match(/\bBEGIN\b/gi) || []).length
+    const ends = (codeOnly.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
+    if (begins > 0) sawBegin = true
+    depth += begins - ends
+    if (sawBegin && depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
+      return i + 1
+    }
+    if (depth < 0) depth = 0
+  }
+  return undefined
+}
+
+/**
+ * regex 路径：对 .sql 文件里的独立 CREATE PROCEDURE/FUNCTION 算 lineRange。
+ * 复用 stripBlockComments + findProcEndLine（BEGIN/END 栈）。params/returnType
+ * 不提取（regex 降级字段缺省，下游 LLM 可补，见 inventory-builder 注释）。
+ */
+function regexExtractStandaloneProcs(
+  code: string,
+  relPath: string,
+  standaloneProcedures: StandaloneProcIndex[],
+): void {
+  const lines = stripBlockComments(code.split("\n"))
+  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+(\w+)/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(code)) !== null) {
+    const type: "procedure" | "function" = m[1].toUpperCase() === "PROCEDURE" ? "procedure" : "function"
+    const name = m[2].toLowerCase()
+    const startLine = code.slice(0, m.index).split("\n").length
+    const endLine = findProcEndLine(lines, startLine - 1)
+    standaloneProcedures.push(
+      endLine
+        ? { name, type, sourceFile: relPath, lineRange: [startLine, endLine] }
+        : { name, type, sourceFile: relPath },
+    )
+  }
+}
+
+/**
+ * 把 standaloneProcedures 注入 packages 作为虚拟包，使下游 per-package 流水线
+ *（inventory-packages / 分片 / FSD / translate）能自然处理独立存储过程，不再漏翻译。
+ * 每个独立过程自成虚拟包（单过程最小单元），规避爆上下文，且不引入通用包拆分机制。
+ * standaloneProcedures 字段保留（metrics/报表兼容）。
+ */
+function injectStandaloneVirtualPackages(
+  packages: PackageIndex[],
+  standaloneProcedures: StandaloneProcIndex[],
+): void {
+  const existing = new Set(packages.map(p => p.name))
+  for (const s of standaloneProcedures) {
+    const base = `__STANDALONE_${s.name.toUpperCase()}`
+    let vname = `${base}__`
+    let suffix = 2
+    while (existing.has(vname)) {
+      vname = `${base}_${suffix}__`
+      suffix++
+    }
+    existing.add(vname)
+    const lineRange = s.lineRange
+    const loc = lineRange ? lineRange[1] - lineRange[0] + 1 : 0
+    packages.push({
+      name: vname,
+      specFile: undefined,
+      bodyFile: s.sourceFile,
+      procedures: [{
+        name: s.name,
+        type: s.type,
+        lineRange,
+        params: s.params,
+        returnType: s.returnType ?? null,
+        loc,
+      }],
+      estimatedLoc: loc,
+      types: [],
+      variables: [],
+      constants: [],
+    })
   }
 }
 

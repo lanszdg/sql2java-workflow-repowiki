@@ -181,6 +181,7 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 - **analysis.json**：`${artifactsDir}/analysis.json`（含 callGraph、translationOrder、refName 规范、complexity）——**只读，不修改**
 - **逐包 inventory**：`${artifactsDir}/inventory-packages/{PKG}.json`（子程序列表 + 参数类型 + lineRange）
 - **源码文件**：本分片包的 spec + body（按 `inventory-packages/{PKG}.json` 的 specFile/bodyFile 路径——不要读 inventory-index.json，它含全量包路径）
+  - `__STANDALONE_*__` 是独立存储过程的虚拟包，`specFile` 为空属正常（只有 body/源文件），按正常 per-package 流程处理
 
 ### 输出
 

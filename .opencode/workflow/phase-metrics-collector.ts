@@ -440,15 +440,17 @@ function extractInventoryData(data: PhaseBusinessData, dir: string): void {
   try { data.sequenceCount = safeArrayLen(json.sequences) } catch { /* skip */ }
   try { data.standaloneProcedureCount = safeArrayLen(json.standaloneProcedures) } catch { /* skip */ }
 
-  // totalProcedureCount = sum(packages[].procedures.length) + standaloneProcedures.length
+  // totalProcedureCount = sum(packages[].procedures.length)
+  // 注：standalone 过程已以 __STANDALONE_*__ 虚拟包形式注入 packages（见 plsql-scanner），
+  // procInPackages 已涵盖它们，不再额外加 standaloneProcedureCount（否则重复计数）。
+  // standaloneProcedureCount 仅作辅助指标（独立过程数）。
   try {
     const pkgs = json.packages
     if (Array.isArray(pkgs)) {
-      const procInPackages = pkgs.reduce(
+      data.totalProcedureCount = pkgs.reduce(
         (sum: number, pkg: unknown) => sum + safeArrayLen((pkg as Record<string, unknown>).procedures),
         0,
       )
-      data.totalProcedureCount = procInPackages + (data.standaloneProcedureCount ?? 0)
     }
   } catch { /* skip */ }
 }

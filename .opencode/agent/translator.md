@@ -100,6 +100,7 @@ permission:
 - **上游 artifact**：
   - `${artifactsDir}/inventory.json` — 表、触发器、视图、序列编目
   - `${artifactsDir}/inventory-packages/{PKG}.json` — 当前翻译包的完整细节（procedures, types, variables, constants）+ 本包源码路径（specFile/bodyFile）
+    - `__STANDALONE_*__` 是独立存储过程的虚拟包，`specFile` 可能为空（只有 body/源文件），按正常 per-package 流程翻译
   - `${artifactsDir}/plan.json` — 映射规则和编码约定
   - `${artifactsDir}/analysis.json` — 全局元数据（translationOrder、complexity、callGraph）
   - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（逐包读取）

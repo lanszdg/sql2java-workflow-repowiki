@@ -232,6 +232,10 @@ export function buildAnalysisFromIndex(artifactsDir: string): {
   const refIndex = buildRefNameIndex(index.packages)
 
   // 2) callGraph（子程序级，仅 subprogram 调用）+ 收集所有跨包引用点（包级，含常量/类型）
+  // 局限：scanCallSites 只识别 `PKG.PROC` 点号模式调用。standalone 过程被 package 裸名
+  // 调用（proc_name() 无包前缀）时，调用边进不了 callGraph——但不阻断 standalone 自身被
+  // 翻译（虚拟包进 packages 后自然走 FSD/translate），仅 package→standalone 跨包对接边
+  // 可能缺失，由后续 review/fix 兜底。standalone 调用 package（PKG.PROC 形式）不受影响。
   const callGraph: Record<string, string[]> = {}
   const allRefs: { callerPkg: string; calleePkg: string }[] = []
   for (const pkg of index.packages) {

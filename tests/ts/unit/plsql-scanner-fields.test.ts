@@ -166,6 +166,20 @@ describe("plsql-scanner AST 字段抽取 (tiny fixture)", () => {
       expect(fn.params).toHaveLength(3)
       expect(fn.params!.map(p => p.name)).toEqual(["p_cum_pct", "p_a_pct", "p_b_pct"])
     })
+
+    itAst("standalone 注入虚拟包 __STANDALONE_FN_ABC_CLASS__（含 lineRange/bodyFile）", () => {
+      const pkg = result!.packages.find(p => p.name === "__STANDALONE_FN_ABC_CLASS__")
+      expect(pkg).toBeTruthy()
+      expect(pkg!.specFile).toBeUndefined()
+      expect(pkg!.bodyFile).toBeTruthy()
+      expect(pkg!.procedures).toHaveLength(1)
+      const proc = pkg!.procedures[0]
+      expect(proc.name).toBe("fn_abc_class")
+      expect(proc.type).toBe("function")
+      expect(proc.lineRange).toBeTruthy()
+      expect(proc.lineRange![0]).toBeGreaterThanOrEqual(1)
+      expect(proc.lineRange![1]).toBeGreaterThan(proc.lineRange![0])
+    })
   })
 
   // ── Trigger ──
