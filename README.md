@@ -154,17 +154,44 @@ sql2java-workflow/
 | D22 | rejection guidance | 每阶段的拒绝引导，鼓励重做而非修补 JSON |
 | D23 | 跨平台文件操作 | atomicRename/safeRm/safeWriteFile 处理 Windows 文件锁定 |
 | D24 | 用户自定义规约 | `--spec` 参数指定 Markdown 规约文件，按 `##` 章节覆盖内置 java-code-spec.md 同名章节，独有章节追加；目录结构从"工程结构"章节提取 |
+| D25 | 自然语言参数解析 + run-context | `/sql2java` 支持自然语言输入，先提取 CLI flag（--db_conf/--spec/--mainEntry）再对剩余文本做字段抽取（path/dbConf/specConf/mainEntry/phases）；start 时把输入参数 + runId + 目录写入 `run-context.json` 作为稳固快照，resume 时兜底恢复 metadata。mainEntry（翻译起点/对外门面包）当前只采集+存储+注入 runtime context，plan/scaffold 消费留后续 |
 
 ## 命令用法
+
+支持**自然语言**或 **CLI flag** 两种输入风格。解析器先提取 flag，剩余文本做自然语言参数提取，抽不全的必填字段（源码目录）会追问用户。
+
+### 自然语言（推荐）
+
+```
+/sql2java 帮我把 /path/sql 下的存储过程转成 java，配置在 db.xml，主入口是 ORDER_PKG
+/sql2java /path/sql                          # 纯路径 → 端到端全流程
+/sql2java 看下状态                            # → status
+/sql2java 继续上次                            # → resume
+```
+
+### CLI flag（兼容老语法）
 
 ```
 /sql2java <path>                              # 端到端全流程
 /sql2java --db_conf db.xml <path>             # 指定数据库配置文件
 /sql2java --spec project-spec.md <path>       # 指定用户自定义代码规约文件
-/sql2java --status                            # 查看工作流状态
-/sql2java --resume                            # 断点续传
+/sql2java --mainEntry ORDER_PKG <path>        # 指定翻译起点/对外门面包
+/sql2java status                              # 查看工作流状态
+/sql2java resume                              # 断点续传
 /sql2java --phases plan,scaffold <path>       # 指定阶段执行
 ```
+
+### 可提取参数
+
+| 字段 | 必填 | 缺省规则 |
+|------|------|----------|
+| `path`（PL/SQL 源码目录） | 是 | 抽不出则追问用户，不自行编造 |
+| `dbConf`（db.xml 路径） | 否 | 在 `path` 下自动查找 `db.xml` |
+| `specConf`（规约文件） | 否 | 在 `path` 下找 `project-spec.md`（旧 `project-structure.md`）；都没有用内置默认规约 |
+| `mainEntry`（翻译起点/对外门面包名） | 否 | 缺省不填，由 inventory/analyze 推断或后续补充 |
+| `phases` / `mode` | 否 | `status` / `resume` / 指定阶段 / 端到端全流程 |
+
+解析结果连同用户原始输入写入 `.workflow-artifacts/{runId}/run-context.json`，`resume` 时作为输入参数的兜底事实源。
 
 ## 后台运行长程任务
 
@@ -173,7 +200,7 @@ sql2java 工作流涉及多个阶段，完整转译耗时较长。可通过 open
 ### 前置条件
 
 - 使用 `--dangerously-skip-permissions` 自动批准权限（包括 plan 阶段的 confirm）
-- 配合 `--resume` 可在 LLM 上下文溢出或中断后断点续传
+- 配合 `resume` 可在 LLM 上下文溢出或中断后断点续传
 
 ### 方案一：nohup 后台直接运行
 
@@ -202,7 +229,7 @@ opencode run "/sql2java /path/to/plsql" \
 ### 方案三：断点续传（中断后恢复）
 
 ```bash
-nohup opencode run "/sql2java --resume" \
+nohup opencode run "/sql2java resume" \
   --dangerously-skip-permissions \
   --format json \
   -m zai-coding-plan/glm-5.1 \
@@ -231,6 +258,7 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 ```
 .workflow-artifacts/{runId}/
 ├── run.json                             # WorkflowRun 持久化
+├── run-context.json                     # 输入参数 + 目录稳固快照（start 时写一次，resume 兜底）
 ├── inventory-index.json                 # 预扫描索引（machine-generated，start 时生成）
 ├── inventory-packages/                  # 逐包 inventory（LLM enriched）
 │   ├── PKG_ORDER.json

@@ -74,6 +74,47 @@ export function formatRunId(sourcePath?: string): string {
   return `run-${proj}-${ts}`
 }
 
+/**
+ * run-context.json — 一次运行的输入参数 + 目录的稳固快照。
+ * 与 run.json（引擎状态，会被引擎更新）互补：run-context.json 在 start 时写一次，
+ * 记录用户原始输入与解析后参数，resume 时作为输入参数的兜底事实源。
+ */
+export interface RunContext {
+  runId: string
+  originalInput: string                  // 用户原始 $ARGUMENTS 文字，便于回溯
+  params: {
+    path?: string
+    dbConf?: string
+    specConf?: string
+    mainEntry?: string
+    phases?: string
+    mode?: string
+  }
+  dirs: { artifacts: string; logs: string }
+  createdAt: string
+}
+
+function runContextPath(runId: string): string {
+  return join(ARTIFACT_DIR, runId, "run-context.json")
+}
+
+function writeRunContext(ctx: RunContext): void {
+  const filePath = runContextPath(ctx.runId)
+  const dir = join(ARTIFACT_DIR, ctx.runId)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(filePath, JSON.stringify(ctx, null, 2), "utf-8")
+}
+
+function loadRunContext(runId: string): RunContext | null {
+  try {
+    const filePath = runContextPath(runId)
+    if (!existsSync(filePath)) return null
+    return JSON.parse(readFileSync(filePath, "utf-8")) as RunContext
+  } catch {
+    return null
+  }
+}
+
 /** 从 agentFile 路径提取 agent 短名 (e.g. "agent/sql-analyst.md" → "sql-analyst") */
 function agentFileToName(agentFile: string): string {
   return agentFile.replace(/^agent\//, "").replace(/\.md$/, "")
@@ -603,6 +644,8 @@ function buildRuntimeContext(run: WorkflowRun): string {
   lines.push(`currentPhase: ${run.currentPhase ?? "unknown"}`)
   lines.push(`runId: ${run.runId}`)
   lines.push(`sourcePath: ${(run.metadata as Record<string, unknown>).sourcePath ?? "unknown"}`)
+  const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
+  if (mainEntry) lines.push(`mainEntry: ${mainEntry}`)
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
   // projectRoot: scaffold 及后续阶段从 plan.json 的 targetProject.artifactId 推导
@@ -679,6 +722,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 | \`artifactsDir\` | artifact 输出目录 | 读取上游 artifact / 写入产出 |
 | \`upstreamArtifacts\` | 上游 artifact 路径列表 | 当前阶段需要读取的文件 |
 | \`incrementalContext\` | 增量模式上下文（可选） | fix 后增量处理时传入 targetPackages；分片模式下含 shardIndex/totalShards |
+| \`mainEntry\` | 翻译起点/对外门面包名（可选，由用户输入提取） | 标识对外门面包，后续 plan/scaffold 阶段消费 |
 | \`projectStructure\` | 自定义目录结构路径列表（可选，由 --spec 提取） | scaffold 阶段使用自定义目录布局替代默认模板 |
 | \`projectRoot\` | Java 项目输出根目录（绝对路径，scaffold 及之后阶段，可选） | scaffold 写入 Java 文件到此目录，后续阶段从此目录读取 |
 
@@ -1818,6 +1862,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         phases: zFn.string().optional(),        // --phases 用
         dbConf: zFn.string().optional(),        // --db_conf 用
         specConf: zFn.string().optional(),      // --spec 用
+        mainEntry: zFn.string().optional(),     // 翻译起点/对外门面包，自然语言提取或 --mainEntry
+        originalInput: zFn.string().optional(), // 用户原始 $ARGUMENTS 文字，写入 run-context.json 供回溯
       },
       execute: async (args: any, context: any) => {
         // ── Worker 编排工具拦截（L1 防线）──
@@ -1856,6 +1902,9 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
             const metadata: Record<string, unknown> = {}
             if (args.sourcePath) metadata.sourcePath = args.sourcePath
+            if (args.dbConf) metadata.dbConf = args.dbConf
+            if (args.specConf) metadata.specConf = args.specConf
+            if (args.mainEntry) metadata.mainEntry = args.mainEntry
             if (userSpecResult?.projectStructure) metadata.projectStructure = userSpecResult.projectStructure
             if (userSpecResult?.sourcePath) metadata.userSpecPath = userSpecResult.sourcePath
 
@@ -1978,6 +2027,24 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 }
               }
             }
+
+            // 写入 run-context.json：输入参数 + 目录的稳固快照，resume 兜底事实源
+            writeRunContext({
+              runId,
+              originalInput: (args.originalInput as string) ?? "",
+              params: {
+                path: args.sourcePath as string | undefined,
+                dbConf: args.dbConf as string | undefined,
+                specConf: args.specConf as string | undefined,
+                mainEntry: args.mainEntry as string | undefined,
+                phases: args.phases as string | undefined,
+              },
+              dirs: {
+                artifacts: join(ARTIFACT_DIR, runId),
+                logs: join(ARTIFACT_DIR, runId, "logs"),
+              },
+              createdAt: new Date().toISOString(),
+            })
 
             const run = engine.start("sql2java", runId, metadata)
             getLogger().info("[workflow]", `工作流启动: runId=${runId} sourcePath=${args.sourcePath ?? "N/A"} scan=${scanStatus}`)
@@ -2814,6 +2881,15 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             // 先持久化已有 collector（rejected Worker 的指标可能未保存），再重建
             if (currentWorkflowContext && activeCollector) {
               persistCollectorIfActive(currentWorkflowContext.runId)
+            }
+            // 兜底：若 run.json 的 metadata 缺失输入参数（旧 run 或损坏），从 run-context.json 恢复
+            const restoredCtx = loadRunContext(runId)
+            if (restoredCtx) {
+              const md = run.metadata as Record<string, unknown>
+              if (restoredCtx.params.path && !md.sourcePath) md.sourcePath = restoredCtx.params.path
+              if (restoredCtx.params.dbConf && !md.dbConf) md.dbConf = restoredCtx.params.dbConf
+              if (restoredCtx.params.specConf && !md.specConf) md.specConf = restoredCtx.params.specConf
+              if (restoredCtx.params.mainEntry && !md.mainEntry) md.mainEntry = restoredCtx.params.mainEntry
             }
             setWorkflowContext(run)
 
