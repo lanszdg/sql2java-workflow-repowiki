@@ -59,12 +59,15 @@ describe("narrowUpstreamForShard", () => {
     expect(result).not.toContain("inventory-packages/PKG_A.json")
   })
 
-  it("review: analysis-packages/*.json 收窄到本分片包，translations/* 展开为已完成分片", () => {
+  it("review: analysis-packages/*.json 收窄到本分片包，translations/* 收窄到本分片包（不展开已完成分片）", () => {
+    // cf4ca26 后：review 只审本分片包翻译，translations/* 收窄到 targetPkgs 而非 completedPkgs，
+    // 避免第一分片 completedPkgs=[] 时 glob 保留导致 worker 全审所有包。
     const upstream = ["plan.json", "scaffold.json", "analysis.json", "analysis-packages/*.json", "dedup.json", "translations/*/translation.json"]
     const result = narrowUpstreamForShard(upstream, "review", ["PKG_B"], ["PKG_A"])
     expect(result).toContain("analysis-packages/PKG_B.json")
     expect(result).not.toContain("analysis-packages/*.json")
-    expect(result).toContain("translations/PKG_A/translation.json")
+    expect(result).toContain("translations/PKG_B/translation.json")
+    expect(result).not.toContain("translations/PKG_A/translation.json")
     expect(result).not.toContain("translations/*/translation.json")
   })
 

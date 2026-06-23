@@ -27,14 +27,15 @@ beforeAll(async () => {
 describe("buildAnalysisFromIndex (tiny fixture)", () => {
   it("生成 analysis.json 并过 AnalysisMetaSchema 校验", () => {
     const r = buildAnalysisFromIndex(dir)
-    expect(r.packageCount).toBe(2)
+    expect(r.packageCount).toBe(3)
     const a = JSON.parse(readFileSync(join(dir, "analysis.json"), "utf-8"))
     expect(AnalysisMetaSchema.safeParse(a).success).toBe(true)
   })
 
   it("packageNames 覆盖全部包", () => {
     const a = JSON.parse(readFileSync(join(dir, "analysis.json"), "utf-8"))
-    expect(a.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG"])
+    // 含独立函数 fn_abc_class 注入的虚拟包
+    expect(a.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
   })
 
   it("packageDependency 捕获跨包常量引用（CORE_PKG→BASE_PKG）", () => {
@@ -46,7 +47,10 @@ describe("buildAnalysisFromIndex (tiny fixture)", () => {
 
   it("translationOrder 依赖在前：BASE_PKG 先于 CORE_PKG", () => {
     const a = JSON.parse(readFileSync(join(dir, "analysis.json"), "utf-8"))
-    expect(a.translationOrder).toEqual([["BASE_PKG"], ["CORE_PKG"]])
+    // 含独立函数虚拟包；CORE_PKG 依赖 BASE_PKG，故 BASE_PKG 必在前
+    const order = a.translationOrder.flat()
+    expect(order).toEqual(expect.arrayContaining(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"]))
+    expect(order.indexOf("BASE_PKG")).toBeLessThan(order.indexOf("CORE_PKG"))
   })
 
   it("sccGroups：无环时为空", () => {

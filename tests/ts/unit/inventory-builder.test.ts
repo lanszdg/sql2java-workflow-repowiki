@@ -33,10 +33,11 @@ afterAll(() => {
 describe("buildInventoryFromIndex", () => {
   it("生成 inventory-packages/ 逐包文件 + inventory.json", () => {
     const r = buildInventoryFromIndex(dir)
-    expect(r.packageCount).toBe(2)
+    expect(r.packageCount).toBe(3)
     expect(r.tableCount).toBe(6)
     const pkgFiles = readdirSync(join(dir, "inventory-packages")).filter(f => f.endsWith(".json"))
-    expect(pkgFiles.map(f => f.replace(".json", "")).sort()).toEqual(["BASE_PKG", "CORE_PKG"])
+    // tiny fixture 含独立函数 fn_abc_class → 被 injectStandaloneVirtualPackages 注入为虚拟包
+    expect(pkgFiles.map(f => f.replace(".json", "")).sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
     expect(existsSync(join(dir, "inventory.json"))).toBe(true)
   })
 
@@ -55,7 +56,7 @@ describe("buildInventoryFromIndex", () => {
 
   it("inventory.json packageNames 覆盖所有包", () => {
     const inv = JSON.parse(readFileSync(join(dir, "inventory.json"), "utf-8"))
-    expect(inv.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG"])
+    expect(inv.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
   })
 
   it("CORE_PKG 逐包文件含 procedures（含重载）+ types + variables", () => {
