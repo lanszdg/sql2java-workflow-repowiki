@@ -16,7 +16,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, isAbsolute } from "node:path"
 import { AnalysisMetaSchema, AnalysisPackageSchema } from "./artifact-schemas"
 import { formatZodIssues } from "./engine-core"
-import { refNamesForPackage } from "./refname"
+import { refNamesForPackage, pkgOf } from "./refname"
 import { getLogger } from "./workflow-logger"
 
 // ── prescan inventory-index.json 形态（宽松读取）──
@@ -36,6 +36,7 @@ interface PrescanIndex {
 interface SubprogramInfo {
   name: string
   refName: string
+  type: "procedure" | "function"
   lineRange?: [number, number]
 }
 
@@ -69,6 +70,7 @@ export function buildRefNameIndex(pkgs: PrescanPackage[]): Map<string, {
     const subprograms: SubprogramInfo[] = pkg.procedures.map((p, i) => ({
       name: p.name,
       refName: refNames[i],
+      type: (p.type?.toLowerCase() === "function" ? "function" : "procedure") as "procedure" | "function",
       lineRange: p.lineRange,
     }))
     const procNameToRefNames = new Map<string, string[]>()
@@ -175,6 +177,110 @@ export function tarjanSCC(nodes: string[], edges: Map<string, Set<string>>): str
     if (!index.has(v)) strongconnect(v)
   }
   return sccs
+}
+
+/**
+ * 计算 FUNCTION 属主归属（同包内，确定性）。见 plan「FUNCTION 属主归属」。
+ *
+ * 对每个 FUNCTION f，在**同包**子程序 callGraph 上反向 BFS，收集能（经 function→function 链）
+ * 调用 f 的 PROCEDURE 及其最短调用距离；owner = 距离最近者，并列取 refName 字典序最小。
+ * 无任何 PROCEDURE 可达 → f 为孤儿（不在返回 map 中，自身作为独立 unit）。
+ * 跨包调用不建立属主（仅同包边参与反向可达）。
+ *
+ * @returns ownership: `PKG.funcRef` → `PKG.ownerProcRef`（仅被拥有的 FUNCTION）
+ */
+export function assignFunctionOwnership(
+  callGraph: Record<string, string[]>,
+  refIndex: Map<string, { subprograms: SubprogramInfo[]; procNameToRefNames: Map<string, string[]> }>,
+): Map<string, string> {
+  const ownership = new Map<string, string>()
+
+  for (const [pkg, info] of refIndex) {
+    // 同包子程序类型表 + 同包反向邻接（predecessors）
+    const typeOf = new Map<string, "procedure" | "function">()
+    const reverse = new Map<string, string[]>() // callee(full) → [caller(full), ...] 同包
+    for (const s of info.subprograms) {
+      const full = `${pkg}.${s.refName}`
+      typeOf.set(full, s.type)
+      reverse.set(full, [])
+    }
+    for (const [s, callees] of Object.entries(callGraph)) {
+      if (pkgOf(s) !== pkg) continue
+      for (const t of callees) {
+        if (pkgOf(t) !== pkg) continue // 跨包边不参与同包属主
+        const arr = reverse.get(t)
+        if (arr) arr.push(s)
+      }
+    }
+
+    // 每个 FUNCTION 反向 BFS 找可达 PROCEDURE
+    for (const s of info.subprograms) {
+      if (s.type !== "function") continue
+      const f = `${pkg}.${s.refName}`
+      // BFS（无权图首达即最短）
+      const dist = new Map<string, number>([[f, 0]])
+      const queue: string[] = [f]
+      let head = 0
+      while (head < queue.length) {
+        const cur = queue[head++]
+        for (const pred of reverse.get(cur) ?? []) {
+          if (!dist.has(pred)) {
+            dist.set(pred, dist.get(cur)! + 1)
+            queue.push(pred)
+          }
+        }
+      }
+      // 收集可达 PROCEDURE（distance, refName）
+      let best: { ref: string; dist: number } | null = null
+      for (const [node, d] of dist) {
+        if (typeOf.get(node) !== "procedure") continue
+        const cand = { ref: node, dist: d }
+        if (best === null ||
+            cand.dist < best.dist ||
+            (cand.dist === best.dist && cand.ref < best.ref)) {
+          best = cand
+        }
+      }
+      if (best) ownership.set(f, best.ref)
+      // best===null → 孤儿，不入表
+    }
+  }
+  return ownership
+}
+
+/**
+ * 由子程序 callGraph + 属主归属折叠出**单元级**依赖图，跑 Tarjan SCC → procedureOrder。
+ *
+ * unit = 一个 PROCEDURE（full key 自身），或一个孤儿 FUNCTION（full key 自身）；被 owner 拥有的
+ * FUNCTION 折叠进 owner 单元。边：callGraph 每条 s→t 映射为 unit(s)→unit(t)，同单元自环跳过。
+ * 边方向 caller→callee = 依赖（与 tarjanSCC「A→B 表示 A 依赖 B」约定一致），输出依赖在前。
+ */
+export function buildProcedureOrder(
+  callGraph: Record<string, string[]>,
+  refIndex: Map<string, { subprograms: SubprogramInfo[]; procNameToRefNames: Map<string, string[]> }>,
+  ownership: Map<string, string>,
+): string[][] {
+  const unitOf = new Map<string, string>()
+  for (const [pkg, info] of refIndex) {
+    for (const s of info.subprograms) {
+      const full = `${pkg}.${s.refName}`
+      const unit = s.type === "procedure" ? full : (ownership.get(full) ?? full)
+      unitOf.set(full, unit)
+    }
+  }
+  const unitList = [...new Set(unitOf.values())]
+  const edges = new Map<string, Set<string>>()
+  for (const u of unitList) edges.set(u, new Set())
+  for (const [s, callees] of Object.entries(callGraph)) {
+    const us = unitOf.get(s)
+    if (!us) continue
+    for (const t of callees) {
+      const ut = unitOf.get(t)
+      if (!ut || ut === us) continue // 跨包/同单元自环跳过
+      edges.get(us)!.add(ut)
+    }
+  }
+  return tarjanSCC(unitList, edges)
 }
 
 /** 启发式复杂度：LOC + 子程序数 + 出边数 + 模式 grep → score/patterns/riskLevel */
@@ -294,6 +400,14 @@ export function buildAnalysisFromIndex(artifactsDir: string): {
     complexity[pkg.name] = heuristicComplexity(pkg, bodyCode, specCode, outgoing)
   }
 
+  // 5.5) PROCEDURE 级：FUNCTION 属主归属 + 单元级拓扑序 procedureOrder
+  // translate 下沉到 PROCEDURE 级的依赖分析：PROCEDURE 为 unit，FUNCTION 跟随同包属主，
+  // 无属主 FUNCTION 独立成 unit。详见 assignFunctionOwnership / buildProcedureOrder。
+  const functionOwnershipMap = assignFunctionOwnership(callGraph, refIndex)
+  const functionOwnership: Record<string, string> = {}
+  for (const [k, v] of functionOwnershipMap) functionOwnership[k] = v
+  const procedureOrder = buildProcedureOrder(callGraph, refIndex, functionOwnershipMap)
+
   // 6) 写 analysis.json
   const analysis = {
     callGraph,
@@ -302,6 +416,8 @@ export function buildAnalysisFromIndex(artifactsDir: string): {
     complexity,
     sccGroups,
     packageNames: nodes,
+    procedureOrder,
+    functionOwnership,
   }
   const metaResult = AnalysisMetaSchema.safeParse(analysis)
   if (!metaResult.success) {
@@ -322,6 +438,6 @@ export function buildAnalysisFromIndex(artifactsDir: string): {
     writeFileSync(join(analysisPkgDir, `${pkg.name}.json`), JSON.stringify(r.data, null, 2), "utf-8")
   }
 
-  getLogger().info("[analysis-builder]", `生成 analysis.json: ${nodes.length} 包, ${sccGroups.length} SCC 组, ${Object.keys(callGraph).length} 调用边`)
+  getLogger().info("[analysis-builder]", `生成 analysis.json: ${nodes.length} 包, ${sccGroups.length} SCC 组, ${Object.keys(callGraph).length} 调用边, ${procedureOrder.flat().length} PROCEDURE 单元, ${Object.keys(functionOwnership).length} 被拥有 FUNCTION`)
   return { packageCount: nodes.length, sccGroupCount: sccGroups.length, warnings }
 }

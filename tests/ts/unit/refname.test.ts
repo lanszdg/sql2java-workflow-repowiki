@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { refNamesForPackage, validRefNameSet, parseQualified } from "@workflow/refname"
+import { refNamesForPackage, validRefNameSet, parseQualified, pkgOf, refOf } from "@workflow/refname"
 
 describe("refNamesForPackage", () => {
   it("非重载子程序保留裸名", () => {
@@ -94,5 +94,19 @@ describe("parseQualified", () => {
     expect(parseQualified(null as unknown as string)).toBeNull()
     expect(parseQualified(123 as unknown as string)).toBeNull()
     expect(parseQualified({} as unknown as string)).toBeNull()
+  })
+})
+
+describe("pkgOf / refOf（宽松版 unit id 拆分）", () => {
+  it("按首个点拆分 PKG.refName（refName 含重载 __序号 也只按首点拆）", () => {
+    expect(pkgOf("ORDER_PKG.create_order")).toBe("ORDER_PKG")
+    expect(refOf("ORDER_PKG.create_order")).toBe("create_order")
+    expect(pkgOf("UTIL_PKG.get_param__2")).toBe("UTIL_PKG")
+    expect(refOf("UTIL_PKG.get_param__2")).toBe("get_param__2")
+  })
+
+  it("无点时返回原串（宽松，不报 null）", () => {
+    expect(pkgOf("standalone")).toBe("standalone")
+    expect(refOf("standalone")).toBe("standalone")
   })
 })

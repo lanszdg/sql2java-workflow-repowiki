@@ -11,7 +11,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { scanSource } from "@workflow/plsql-scanner"
-import { buildAnalysisFromIndex, tarjanSCC, buildRefNameIndex } from "@workflow/analysis-builder"
+import { buildAnalysisFromIndex, tarjanSCC, buildRefNameIndex, assignFunctionOwnership, buildProcedureOrder } from "@workflow/analysis-builder"
 import { AnalysisMetaSchema, AnalysisPackageSchema } from "@workflow/artifact-schemas"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
@@ -142,6 +142,133 @@ describe("buildRefNameIndex", () => {
     expect(info.subprograms.map(s => s.refName)).toEqual(["get_param__1", "get_param__2", "unique_fn"])
     expect(info.procNameToRefNames.get("GET_PARAM")).toEqual(["get_param__1", "get_param__2"])
     expect(info.procNameToRefNames.get("UNIQUE_FN")).toEqual(["unique_fn"])
+  })
+})
+
+// ── PROCEDURE 级下沉：FUNCTION 属主归属 + 单元级 procedureOrder ──────────────
+/** 构造 refIndex 辅助：procs 用小写名（refName=原名） */
+function makeRefIndex(pkgs: { name: string; procs: { name: string; type: "procedure" | "function" }[] }[]) {
+  return buildRefNameIndex(pkgs.map(p => ({
+    name: p.name,
+    procedures: p.procs.map(c => ({ name: c.name, type: c.type })),
+  })))
+}
+
+describe("assignFunctionOwnership（FUNCTION 属主归属）", () => {
+  it("单属主：func 仅被 1 个 proc 调用 → 归它", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "f1", type: "function" },
+    ] }])
+    const callGraph = { "P.p1": ["P.f1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.get("P.f1")).toBe("P.p1")
+  })
+
+  it("多调用者等距：取 refName 字典序最小", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
+      { name: "f1", type: "function" },
+    ] }])
+    const callGraph = { "P.p1": ["P.f1"], "P.p2": ["P.f1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.get("P.f1")).toBe("P.p1")
+  })
+
+  it("多调用者不同距：取最近（最直接）属主", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
+      { name: "f1", type: "function" }, { name: "f2", type: "function" },
+    ] }])
+    // p1→f1→f2（p1 到 f2 距离 2）；p2→f2（距离 1）→ owner p2
+    const callGraph = { "P.p1": ["P.f1"], "P.f1": ["P.f2"], "P.p2": ["P.f2"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.get("P.f1")).toBe("P.p1")
+    expect(own.get("P.f2")).toBe("P.p2")
+  })
+
+  it("孤儿：func 无任何 proc 调用 → 不入 ownership", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "f1", type: "function" },
+    ] }])
+    const callGraph = {}
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.has("P.f1")).toBe(false)
+  })
+
+  it("仅跨包调用不建立属主：func 在 P 仅被 Q 的 proc 调用 → P 中孤儿", () => {
+    const ref = makeRefIndex([
+      { name: "P", procs: [{ name: "f1", type: "function" }] },
+      { name: "Q", procs: [{ name: "q1", type: "procedure" }] },
+    ])
+    const callGraph = { "Q.q1": ["P.f1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.has("P.f1")).toBe(false)
+  })
+
+  it("经 function 链传递归属：p1→f1→f2，f2 归 p1（传递）", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" },
+      { name: "f1", type: "function" }, { name: "f2", type: "function" },
+    ] }])
+    const callGraph = { "P.p1": ["P.f1"], "P.f1": ["P.f2"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    expect(own.get("P.f1")).toBe("P.p1")
+    expect(own.get("P.f2")).toBe("P.p1")
+  })
+})
+
+describe("buildProcedureOrder（单元级拓扑序）", () => {
+  it("被拥有 FUNCTION 折叠进 owner 单元，不独立成 unit", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "f1", type: "function" },
+    ] }])
+    const callGraph = { "P.p1": ["P.f1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    const order = buildProcedureOrder(callGraph, ref, own)
+    expect(order.flat()).toEqual(["P.p1"]) // f1 折叠，不独立
+  })
+
+  it("孤儿 FUNCTION 独立成 unit", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "f1", type: "function" },
+    ] }])
+    const own = assignFunctionOwnership({}, ref)
+    const order = buildProcedureOrder({}, ref, own)
+    expect(order.flat()).toEqual(["P.f1"])
+  })
+
+  it("跨包调用：被依赖 unit 在前", () => {
+    const ref = makeRefIndex([
+      { name: "P", procs: [{ name: "f1", type: "function" }] },
+      { name: "Q", procs: [{ name: "q1", type: "procedure" }] },
+    ])
+    const callGraph = { "Q.q1": ["P.f1"] } // q1 调用 P.f1（孤儿）→ Q.q1 依赖 P.f1
+    const own = assignFunctionOwnership(callGraph, ref)
+    const order = buildProcedureOrder(callGraph, ref, own).flat()
+    expect(order.indexOf("P.f1")).toBeLessThan(order.indexOf("Q.q1"))
+  })
+
+  it("单元间 SCC（互调用 proc）归同层", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
+    ] }])
+    const callGraph = { "P.p1": ["P.p2"], "P.p2": ["P.p1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    const order = buildProcedureOrder(callGraph, ref, own)
+    expect(order.length).toBe(1)
+    expect(order[0].sort()).toEqual(["P.p1", "P.p2"])
+  })
+
+  it("同包跨单元调用：被依赖 unit 在前（多调用者归属后）", () => {
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
+      { name: "f1", type: "function" },
+    ] }])
+    // p1→f1, p2→f1：f1 归 p1（字典序）；p2→f1 折叠为 p2→p1 依赖边 → p1 在前
+    const callGraph = { "P.p1": ["P.f1"], "P.p2": ["P.f1"] }
+    const own = assignFunctionOwnership(callGraph, ref)
+    const order = buildProcedureOrder(callGraph, ref, own).flat()
+    expect(order.indexOf("P.p1")).toBeLessThan(order.indexOf("P.p2"))
   })
 })
 

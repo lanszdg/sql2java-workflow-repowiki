@@ -20,7 +20,7 @@ import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdi
 import { safeWriteFile } from "./cross-platform"
 import { join } from "node:path"
 import { z } from "zod"
-import { validRefNameSet, parseQualified } from "./refname"
+import { validRefNameSet, parseQualified, pkgOf, refOf } from "./refname"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -112,7 +112,8 @@ export interface PhaseHistoryEntry {
   retryCount: number                            // 每次 retry 递增，与 PhaseConfig.maxRetries 比较
   branchedFrom?: string                         // fix 记录触发阶段；fix 回来的 entry 记录 "fix"
   incrementalContext?: {
-    targetPackages: string[]                    // 增量模式：只处理这些包
+    targetPackages: string[]                    // 增量模式：只处理这些包（analyze/review 包级分片）
+    targetUnits?: string[]                      // translate PROCEDURE 级分片：只处理这些 unit id（PKG.refName）
     shardIndex?: number                         // 分片模式：当前分片序号（0-based）
     totalShards?: number                        // 分片模式：总分片数
     previousFindings?: Array<{                  // 增量 review：上次 review 的 mustFix，供 reviewer 核对是否已修复
@@ -127,8 +128,11 @@ export interface PhaseHistoryEntry {
 /** 分片计划 — 首次 dispatch 可分片阶段时计算，持久化到 run.metadata */
 export interface ShardPlan {
   phase: string                                 // "translate" 等可分片阶段
-  shards: string[][]                            // shards[0] = ["CONST_PKG"], ...
+  shards: string[][]                            // shards[0] = ["CONST_PKG"]（包级）或 ["PKG.p1"]（translate unit 级）
   completedShards: number[]                     // 已完成的分片序号
+  /** true = translate PROCEDURE 级分片（shards 元素是 unit id `PKG.refName`，dispatch 注入 targetUnits）；
+   *  false/缺省 = 包级分片（analyze/review，或无 procedureOrder 回退的 translate，注入 targetPackages）。 */
+  unitMode?: boolean
 }
 
 /** 跨 Schema 校验发现项（D9 扩展：支持 blocking / warning 两级严重度） */
@@ -887,13 +891,43 @@ export class WorkflowEngine {
 
     switch (completedPhase) {
       case "translate": {
-        // G1 + G2: per-package translation quality checks
+        // G1 + G2: 翻译质量检查
         const inventory = this.loadArtifactJson(artifactsDir, "inventory")
         if (!inventory) break
         const pkgNames = this.extractPackageNames(inventory)
-        // 增量模式：只检查目标包
         const currentEntry = this.findCurrentEntry(run)
         const targetPkgs = currentEntry?.incrementalContext?.targetPackages
+        const targetUnits = currentEntry?.incrementalContext?.targetUnits
+
+        // PROCEDURE 级（unit 模式）：按 unit 校验，不按整包完成率（包可能跨多分片、中途必然 partial）。
+        // 每个 targetUnit 的 per-unit 文件须 status=completed，且 subprogramMethods 覆盖其 completedSubprograms。
+        if (targetUnits && targetUnits.length > 0) {
+          for (const u of targetUnits) {
+            const pkg = pkgOf(u)
+            const ref = refOf(u)
+            const unit = this.loadArtifactJson(join(artifactsDir, "translations", pkg), ref) as any
+            if (!unit) continue // 缺失由 validateArtifactOnDisk 完整性检查覆盖
+            const completed = (unit.completedSubprograms as string[]) ?? []
+            // G1-unit: 单元必须 completed（根 + cargo 全译）
+            if (unit.status !== "completed") {
+              findings.push({
+                message: `${pkg}.${ref}: unit status="${unit.status}" 非 completed。本分片单元须全部完成`,
+                severity: "blocking",
+              })
+            }
+            // G2-unit: subprogramMethods 覆盖本单元已完成子程序
+            const methods = (unit.subprogramMethods as unknown[]) ?? []
+            if (methods.length < completed.length) {
+              findings.push({
+                message: `${pkg}.${ref}: subprogramMethods 数量 (${methods.length}) 少于 completedSubprograms (${completed.length})，可能缺少跨包调用映射`,
+                severity: "warning",
+              })
+            }
+          }
+          break
+        }
+
+        // 包级模式（含 procedureOrder 缺失的回退）：原有 G1/G2 整包完成率检查
         const pkgsToCheck = targetPkgs?.length ? new Set(targetPkgs) : pkgNames
 
         for (const pkg of pkgsToCheck) {
@@ -1146,13 +1180,18 @@ export class WorkflowEngine {
    */
 
   /**
-   * 按阶段决定分片所用的包序列：analyze/review 拍平 SCC 组（每包一层，真正一包一分片），
-   * translate 保留 translationOrder 原貌（SCC 互依赖组必须共处）。
+   * 按阶段决定分片所用的序列：analyze/review 拍平 SCC 组（每元素一层，真正一元素一分片），
+   * translate 保留入参原貌（SCC 互依赖组必须共处）。
    *
-   * 为什么 analyze/review 可拆 SCC：每包的子程序结构 / FSD / 审查独立产出，跨包调用关系
-   * （callGraph）已由 inventory 代码预算，不依赖同组其它包的在 session 产物。
-   * 为什么 translate 不可拆：互依赖包翻译时需同 session 拿到对方的 Java 方法签名，拆开会让
-   * 循环引用沦为 TODO 占位。
+   * 入参语义随阶段而异：analyze 传单元级 procedureOrder（`PKG.refName`，PROCEDURE 为 unit，
+   * FUNCTION 跟随属主——下沉到 PROCEDURE 级后由 dispatch 注入）；review 传包级 translationOrder；
+   * translate 传单元级 procedureOrder。三者都是 string[][] 拓扑层，本函数仅按阶段决定是否拍平，
+   * 不关心元素是包名还是 unit id。
+   *
+   * 为什么 analyze/review 可拆 SCC：analyze 现下沉到 PROCEDURE 级，每 procedure 的子程序结构 / FSD
+   * 独立产出，跨包/跨单元调用关系（callGraph）已由 inventory 代码预算，不依赖同组其它单元的在 session
+   * 产物；review 每包审查独立。为什么 translate 不可拆：互依赖 unit 翻译时需同 session 拿到对方的
+   * Java 方法签名，拆开会让循环引用沦为 TODO 占位。
    */
   shardOrderForPhase(translationOrder: string[][], phase: string): string[][] {
     if (phase === "analyze" || phase === "review") {

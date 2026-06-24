@@ -113,7 +113,7 @@ permission:
 
 ### 输出
 
-- **per-package artifact**：`${artifactsDir}/translations/{package}/translation.json`
+- **per-unit artifact**：`${artifactsDir}/translations/{package}/{unitRef}.json`（符合 UnitTranslationSchema；聚合 `translation.json` 由 engine 自动 merge，agent 不直接写）
 - **Java 文件**：写入 Runtime Context 中 `projectRoot` 指定的目录（绝对路径，与 scaffold 阶段使用同一个目录）
 
 ### 工作步骤
@@ -122,45 +122,78 @@ permission:
 
 读取 plan.json（映射规则、conventions）和 analysis.json（translationOrder）。
 
-#### Step 1.5: 确定翻译范围
+#### Step 1.5: 确定翻译范围（PROCEDURE 级单元）
+
+translate 以 **PROCEDURE 为翻译单元**（unit）。一个 unit = 一个根子程序（PROCEDURE，或孤儿 FUNCTION）
++ 其拥有的 cargo FUNCTION（`analysis.json.functionOwnership` 中 owner 等于本 unit id 的 FUNCTION）。
+被拥有的 FUNCTION 不独立翻译，随 owner unit 一起产出。unit id 形如 `PKG.refName`（重载带 `__序号`）。
+
+拓扑序取自 `analysis.json.procedureOrder`（PROCEDURE 级，依赖在前；SCC 组内 unit 必须同 session 翻译）。
+若 `procedureOrder` 缺失（旧 run 回退），改用包级 `translationOrder`，按包整包翻译并写
+`translations/{pkg}/translation.json`（包级模式，见 Step 3 末尾说明）。
 
 检查 Runtime Context 中的 `incrementalContext`：
 
-- **分片模式**（`targetPackages` 存在且 `shardIndex` 存在）：
-  - **只翻译 `targetPackages` 中列出的包**，不要翻译其他包
-  - **只读取本分片 `targetPackages` 中包的源码和 per-package 文件**（源码路径取自 `inventory-packages/{PKG}.json` 的 specFile/bodyFile），不要读其他包的源码/文件，不要一次性读全部源码
-  - 仍按 `translationOrder` 的顺序处理这些包（跳过不在 targetPackages 中的包）
-  - 依赖的已翻译包的 `translation.json` 路径已在 upstreamArtifacts 中给出，直接 `read` 即可（仅限跨包调用对接，不要顺带处理这些包）
-  - 不翻译 targetPackages 之外的任何包
+- **分片模式**（`targetUnits` 存在且 `shardIndex` 存在）：
+  - **只翻译 `targetUnits` 中列出的 unit**（`PKG.refName`），不要翻译其他 unit
+  - 源码/FSD/依赖聚合路径以 Runtime Context「单元读取清单」为准：按清单给出的 `sed -n '起,止p' 文件`
+    命令**只抽取本 unit 根 + cargo FUNCTION 的源码片段**，⛔ 禁止 read 整个包 body/spec（读取单元必须
+    等于工作单元，读整包会顺手翻译其他过程 = 产物冲突）。FSD 路径、依赖聚合 `translation.json` 路径
+    也在清单中给出，直接 `read`（仅限跨包/同包跨单元调用对接，不要顺带处理这些包）
+  - 仍按 `procedureOrder` 顺序处理这些 unit（跳过不在 targetUnits 中的）
+  - 不翻译 targetUnits 之外的任何 unit
 
 - **全量模式**（无 `incrementalContext` 或无 `shardIndex`）：
-  - 翻译 `translationOrder` 中所有包（原有行为）
+  - 翻译 `procedureOrder` 中所有 unit
 
-#### Step 2: 按拓扑序逐包翻译
+#### Step 2: 按 procedureOrder 逐单元翻译
 
-按 `translationOrder` 的顺序处理每个包。SCC 组中的包按数组顺序依次翻译。
+按 `procedureOrder` 的顺序处理每个 unit。SCC 组中的 unit 按数组顺序依次翻译。
 
-对每个包：
+对每个 unit `PKG.refName`：
 
-1. **读取 Oracle 源码**：读取本包的 `.pks` 和 `.pkb` 文件（路径取自 `inventory-packages/{pkg}.json` 的 specFile/bodyFile，只读本包，不要读其他包源码）
-2. **读取子程序结构**：读取 `analysis-packages/{pkg}.json` 获取该包的子程序详情
-3. **逐子程序翻译**：对该包的每个子程序：
-   - 参考子程序的 blocks、variables、cursors、exceptionHandlers
-   - 参考翻译注意事项 translationNotes（string[]，每条一个元素）
-   - 参考**本包** FSD 文档 `fsd/{pkg}/*.md`（注意：`__{序号}.md` 后缀的是重载子程序，对应同一子程序的不同参数版本）。仅当本包 FSD 缺少必要信息时，才 `read` 某个具体的其他包 FSD 文件并显式指明路径，禁止通配全量 FSD
-   - **对接跨包调用**：跨包调用边取自结构化的 `analysis.json.callGraph`（key/value 均为 `PKG.refName`），**不解析 FSD 板块 3 的 markdown**——板块 3 仅为人类可读文档，调用关系以 callGraph 为准。处理子程序 s 的跨包调用：
-     - 查 `callGraph["{本包}.{s 的 refName}"]` 得其调用的 `[PKG.refName, ...]` 列表（拓扑序保证被依赖包先翻译，其 translation.json 此刻已存在）
-     - 对每个跨包目标 `目标包.目标refName`：在被依赖包 `translations/{目标包}/translation.json` 的 `subprogramMethods` 按 `oracleName` 查真实 `javaClass`（Service 接口**全限定名**）和 `javaMethod`
-     - **同一被依赖包的 translation.json 本包只 read 一次**（读后缓存其 subprogramMethods 映射供后续子程序复用），避免逐子程序重复 read
-     - 用真实全限定名 import + 注入 + 调用（如 `import com.example.util.BService;` 注入后 `bService.findY(...)`），**不靠命名约定猜测**
-     - 若依赖包未翻译（仅 SCC 组内可能）或 `subprogramMethods` 缺失：标 `// TODO: [translate] 跨包调用 {目标包}.{目标refName} 待对接`，由 review/fix 兜底
-   - 按五原则翻译为 Java 代码
-3. **生成文件**：
-   - Mapper 接口（`@Mapper`，包含所有子程序对应的 SQL 方法）
-   - Mapper XML（SQL 语句、parameterMap、resultMap）
-   - Service 接口（业务方法签名）
-   - ServiceImpl（业务逻辑实现，注入 Mapper）
-   - DTO 类（OUT 参数、返回值包装）
+1. **确定单元子程序集**：
+   - 根子程序 = unit id 的 refName 部分（`PKG.refName` → `refName`）
+   - cargo FUNCTION = `analysis.json.functionOwnership` 中 value 等于本 unit id 的所有 key 的 refName 部分
+   - 例：unit `PKG_A.create_order`，functionOwnership 含 `PKG_A.calc_total → PKG_A.create_order`，
+     则本单元子程序 = `{create_order, calc_total}`
+
+2. **读取 Oracle 源码**：按 Runtime Context「单元读取清单」给出的 `sed -n '起,止p' 文件` 命令**只抽取
+   本单元根 + cargo FUNCTION 各子程序的源码片段**（非整包），降低上下文。lineRange 取自
+   `inventory-packages/{PKG}.json` 的 `procedures[].lineRange`（清单已据此生成）。⛔ 禁止 read 整个包
+   body/spec 文件。清单里的 sed 命令已用 sourcePath 拼成**绝对路径**，直接执行即可；若自行从
+   inventory-packages 取 bodyFile/specFile，它是**相对 sourcePath** 的路径，须用 `${sourcePath}/${bodyFile}`
+   绝对路径读取（你的 cwd 是项目根，未必等于 sourcePath）。
+
+3. **读取子程序结构**：读取 `analysis-packages/{PKG}.json` 获取本包子程序详情（blocks/variables/
+   cursors/exceptionHandlers/translationNotes）。
+
+4. **读取 FSD**：`fsd/{PKG}/{根refName}.md` + 各 cargo FUNCTION 的 `fsd/{PKG}/{cargoRefName}.md`
+   （`__{序号}.md` 后缀的是重载子程序）。仅当本单元 FSD 缺少必要信息时，才 `read` 某个具体的其他包
+   FSD 文件并显式指明路径，禁止通配全量 FSD。
+
+5. **逐子程序翻译**（根 + cargo FUNCTION）：参考 blocks/variables/cursors/exceptionHandlers/
+   translationNotes + FSD，按五原则翻译为 Java。
+   - **对接跨包调用**：跨包调用边取自结构化的 `analysis.json.callGraph`（key/value 均为 `PKG.refName`），
+     **不解析 FSD 板块 3 的 markdown**。处理子程序 s 的跨包调用：
+     - 查 `callGraph["{PKG}.{s 的 refName}"]` 得其调用的 `[PKG.refName, ...]`（拓扑序保证被依赖 unit 先翻译）
+     - 对每个跨包目标 `目标包.目标refName`：read `translations/{目标包}/translation.json` 的
+       `subprogramMethods` 按 `oracleName` 查真实 `javaClass`（Service 接口**全限定名**）和 `javaMethod`
+     - **同一被依赖包的 translation.json 只 read 一次**（缓存 subprogramMethods 供后续子程序复用）
+     - 用真实全限定名 import + 注入 + 调用，**不靠命名约定猜测**
+   - **同包跨单元调用**：本 unit 调用同包其他 unit 的子程序时，read `translations/{本包}/translation.json`
+     （聚合，含 prior unit 的 subprogramMethods）按 oracleName 解析真实方法名。
+   - **同单元内调用**（根 ↔ 其 cargo FUNCTION）：本地解析，无需跨文件 read。
+   - 未翻译/缺失：标 `// TODO: [translate] 跨包调用 {目标包}.{目标refName} 待对接`，由 review/fix 兜底。
+
+6. **生成/编辑 Java 文件**（同包多个 unit 共享 Service/ServiceImpl/Mapper 文件）：
+   - 先 `read` 本包已有的 Mapper 接口 / Mapper XML / Service 接口 / ServiceImpl（若存在，由同包 prior unit
+     创建）；不存在则新建。**用 edit 追加本单元方法，勿覆盖已有内容**。
+   - Mapper 接口（`@Mapper`）：追加本单元各子程序对应的 SQL 方法
+   - Mapper XML：追加本单元 SQL 语句、parameterMap、resultMap
+   - Service 接口：追加本单元业务方法签名
+   - ServiceImpl：追加本单元业务逻辑实现（注入 Mapper）
+   - DTO 类（OUT 参数、返回值包装）：本单元所需 DTO 若同包 prior unit 已生成则复用，否则新建
    - 异常类（如有自定义异常）
 4. **生成测试代码**（填充 scaffold 生成的测试骨架）：
    - 读取 scaffold 生成的测试骨架文件（路径从 `scaffold.json` 的 `testShells` 获取）
@@ -228,32 +261,40 @@ permission:
    **测试方法命名**：`{mapperMethodName}_should{ExpectedBehavior}`
    - 所有注释使用中文
    - **禁止**生成空方法体（除 `@Disabled` 测试可保留 TODO 注释）
-   - Mapper 集成测试文件在 `translation.json` 的 `files` 数组中标记为 `role: "mapper-integration-test"`
+   - Mapper 集成测试文件在 per-unit 文件的 `files` 数组中标记为 `role: "mapper-integration-test"`
 
-#### Step 3: 逐包持久化
+#### Step 3: 逐单元持久化
 
-**每翻译完一个包**，立即写入：
-- `${artifactsDir}/translations/{package}/translation.json` — 符合 TranslationSchema
+**每翻译完一个 unit**，立即写入：
+- `${artifactsDir}/translations/{package}/{unitRef}.json` — 符合 UnitTranslationSchema（per-unit 产物）
 - 对应的 Java 文件到 Runtime Context 中 `projectRoot` 指定的目录（绝对路径）
 
-translation.json 包含：
-- `packageName`：Oracle 包名
-- `status`：`"completed"`（全部完成）或 `"partial"`（部分完成）
-- `completedSubprograms`：已完成的子程序名列表
-- `totalSubprograms`：子程序总数
-- `files`：生成的 Java 文件列表（path + role，包含生产代码和测试文件）
-- `decisions`：翻译决策记录（line, oracleConstruct, javaConstruct, reason, confidence）
-- `todos`：TODO 标记（file, issue, oracleLine, suggestion）
-- `subprogramMethods`：本包每个子程序 → Java 调用入口索引，供「依赖本包的后续翻译包」对接跨包调用。每项 `{ oracleName=refName, javaClass=Service 接口全限定名(如 com.example.util.BService), javaMethod, javaFile?=接口文件路径 }`；重载子程序 oracleName 用 `{name}__{序号}` 区分（与 refName 一致）
+⚠️ **不要直接写 `translations/{package}/translation.json`**——那是聚合文件，由 engine 在每个分片 advance
+后自动 merge 同包所有 per-unit 文件产生（跨包/同包跨单元调用对接的稳定契约）。agent 只写 per-unit 文件。
 
-完整示例：
+`{unitRef}` = unit 根子程序的 refName（unit id `PKG.refName` 的 refName 部分，重载带 `__序号`）。
+文件名即 `{unitRef}.json`，如 `create_order.json`、`get_param__1.json`。
+
+per-unit 文件包含：
+- `unitRefName`：unit 根子程序 refName（与文件名一致）
+- `packageName`：Oracle 包名
+- `status`：`"completed"`（本单元根+cargo 全部完成）或 `"partial"`
+- `completedSubprograms`：本单元已完成的子程序 refName 列表（根 + cargo）
+- `files`：本单元生成/编辑的 Java 文件列表（path + role，包含生产代码和测试文件）
+- `decisions`：本单元翻译决策记录（line, oracleConstruct, javaConstruct, reason, confidence）
+- `todos`：本单元 TODO 标记（file, issue, oracleLine, suggestion）
+- `subprogramMethods`：本单元子程序（根 + cargo）→ Java 调用入口索引，供「依赖本 unit 的后续 unit」
+  对接跨包/同包跨单元调用。每项 `{ oracleName=refName, javaClass=Service 接口全限定名, javaMethod,
+  javaFile?=接口文件路径 }`；重载子程序 oracleName 用 `{name}__{序号}` 区分（与 refName 一致）
+
+完整示例（unit `PKG_ORDER.create_order`，cargo FUNCTION `calc_total`）：
 
 ```json
 {
+  "unitRefName": "create_order",
   "packageName": "PKG_ORDER",
   "status": "completed",
-  "completedSubprograms": ["create_order", "cancel_order", "get_param__1", "get_param__2"],
-  "totalSubprograms": 4,
+  "completedSubprograms": ["create_order", "calc_total"],
   "files": [
     { "path": "src/main/java/com/example/ordersystem/mapper/OrderMapper.java", "role": "mapper-interface" },
     { "path": "src/main/resources/mapper/OrderMapper.xml", "role": "mapper-xml" },
@@ -272,9 +313,7 @@ translation.json 包含：
   ],
   "subprogramMethods": [
     { "oracleName": "create_order", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "createOrder", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
-    { "oracleName": "cancel_order", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "cancelOrder", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
-    { "oracleName": "get_param__1", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "getParamByName", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" },
-    { "oracleName": "get_param__2", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "getParamById", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" }
+    { "oracleName": "calc_total", "javaClass": "com.example.ordersystem.order.OrderService", "javaMethod": "calcTotal", "javaFile": "src/main/java/com/example/ordersystem/order/service/OrderService.java" }
   ]
 }
 ```
@@ -284,35 +323,45 @@ translation.json 包含：
 - `decisions[].confidence`：推荐 `"high"` / `"medium"` / `"low"`
 - `subprogramMethods[].oracleName`：重载子程序必须用 `{name}__{序号}`（与 refName/callGraph 一致），禁止裸名重复
 - `subprogramMethods[].javaClass`：**Service 接口全限定名**（如 `com.example.ordersystem.order.OrderService`），不是简单类名
-- `totalSubprograms`：数字类型，支持字符串自动转换（写 `"5"` 等同 5）
+- `subprogramMethods` 必须覆盖本单元所有子程序（根 + cargo FUNCTION）
+
+> **包级回退模式**（`procedureOrder` 缺失的旧 run）：按 `translationOrder` 整包翻译，写
+> `translations/{package}/translation.json`（TranslationSchema，含 `packageName`/`status`/
+> `completedSubprograms`/`totalSubprograms`/`files`/`decisions`/`todos`/`subprogramMethods`，
+> subprogramMethods 覆盖全包子程序）。
 
 ### 中断恢复
 
 如果 translate 阶段被中断后恢复（retry）：
-1. 检查 `${artifactsDir}/translations/*/translation.json`
-2. 跳过 `status === "completed"` 的包
-3. 对 `status === "partial"` 的包，读取 `completedSubprograms` 跳过已完成的子程序，只翻译剩余子程序
+1. 检查 `${artifactsDir}/translations/{package}/{unitRef}.json`（per-unit 文件）
+2. 跳过 `status === "completed"` 的 unit（per-unit 文件已存在且 completed）
+3. 对 `status === "partial"` 的 unit，读取其 `completedSubprograms` 跳过已完成子程序，只翻译剩余
+4. 包级回退模式：检查 `translations/*/translation.json`，跳过 completed 包，partial 包读 completedSubprograms 续译
 
 ### 质量检查
 
-- [ ] 按 translationOrder 顺序处理包（SCC 组按数组内顺序）
-- [ ] 每个子程序都有对应的 Java 方法
+- [ ] 按 procedureOrder 顺序处理 unit（SCC 组按数组内顺序）
+- [ ] 每个单元的子程序（根 + cargo FUNCTION）都有对应的 Java 方法
 - [ ] 每个 SQL 语句都有对应的 MyBatis 映射
 - [ ] OUT/IN OUT 参数通过 DTO 传递
 - [ ] 不确定的构造标记了 `// TODO: [translate] 标记人 标记时间 中文说明`
-- [ ] translation.json 记录了所有翻译决策和 TODO
+- [ ] per-unit 文件记录了本单元所有翻译决策和 TODO
 - [ ] 跨包调用用了真实方法名（读依赖包 `translations/{pkg}/translation.json` 的 `subprogramMethods`），非命名猜测；SCC 组内未对接的已标 TODO
-- [ ] translation.json 的 `subprogramMethods` 覆盖本包所有子程序：`oracleName` 用 refName（重载带 `__序号`）、`javaClass` 用 Service 接口全限定名
+- [ ] 同包跨单元调用用了真实方法名（读本包聚合 `translations/{pkg}/translation.json` 的 `subprogramMethods`）
+- [ ] per-unit 文件的 `subprogramMethods` 覆盖本单元所有子程序（根 + cargo）：`oracleName` 用 refName（重载带 `__序号`）、`javaClass` 用 Service 接口全限定名
+- [ ] 同包多 unit 共享的 Service/ServiceImpl/Mapper 文件用 edit 追加方法，未覆盖 prior unit 内容
 - [ ] Java 代码规约已全面遵守（命名、格式、注释语言、OOP、集合与异常等，详见注入的规约文档）
 - [ ] 每个 ServiceImpl 方法都有对应的测试方法（含完整 arrange→act→assert 逻辑）
-- [ ] 测试文件在 translation.json 的 files 数组中标记为 role `"test"`
+- [ ] 测试文件在 per-unit 文件的 files 数组中标记为 role `"test"`
 - [ ] 测试方法注释使用中文
 - [ ] 每个 Mapper XML 的 SQL statement 都有对应的集成测试方法
-- [ ] Mapper 集成测试文件在 translation.json 的 files 数组中标记为 role `"mapper-integration-test"`
+- [ ] Mapper 集成测试文件在 per-unit 文件的 files 数组中标记为 role `"mapper-integration-test"`
 - [ ] H2 不兼容的 SQL 已标 `@Disabled`（生产 Mapper XML 保持不变）
 - [ ] 测试数据 INSERT 使用硬编码 ID 值（不使用 SEQ.NEXTVAL）
 - [ ] Mapper 集成测试方法注释使用中文
-- [ ] 分片模式下只翻译了 `targetPackages` 指定的包，未遗漏也未多余
+- [ ] 分片模式下只翻译了 `targetUnits` 指定的 unit，未遗漏也未多余
+- [ ] 源码只按「单元读取清单」的 `sed -n` 抽取了片段，未 read 整个包 body/spec
+- [ ] 只写 per-unit `translations/{pkg}/{unitRef}.json`，未直接写聚合 `translation.json`
 
 ---
 
@@ -331,13 +380,13 @@ translation.json 包含：
   - `${artifactsDir}/scaffold.json` — 项目结构
   - 触发阶段的 summary（`review-summary.json` 或 `verify-summary.json`）
   - 相关包的 per-package artifact（review.json / verify.json）
-- **incrementalContext.targetPackages**：需要修复的包列表
+- **incrementalContext.targetPackages**：需要修复的包列表（fix 按包触发；unit 模式下需重翻这些包的全部 unit）
 - **源码文件**：原始 PL/SQL 文件
 
 ### 输出
 
 - **更新 Java 文件**：修复后的代码覆盖原文件（路径基于 `projectRoot`，如 `{projectRoot}/src/main/java/...`）
-- **更新 translation.json**：对应的包翻译记录
+- **更新 per-unit 文件**（unit 模式）：重翻受影响包的 unit，写 `translations/{pkg}/{unitRef}.json`；聚合 `translation.json` 由 engine 自动 re-merge。包级回退模式：直接更新 `translations/{pkg}/translation.json`
 - **fix artifact**：`${artifactsDir}/fix.json` — 符合 FixArtifactSchema
 
 ### 工作步骤
@@ -354,7 +403,13 @@ translation.json 包含：
 1. 定位到具体 Java 文件和行号（文件路径基于 `projectRoot`，如 `{projectRoot}/src/main/java/...`）
 2. 对照 `analysis-packages/{pkg}.json` 的子程序结构和源码理解问题
 3. 按五原则修复（如果 mustFix 项涉及测试文件，同样修复测试代码）
-4. 更新对应的 translation.json
+4. 更新受影响 unit 的 per-unit 文件元数据（unit 模式：edit `translations/{pkg}/{unitRef}.json` 的
+   decisions/todos/files，若方法签名变更则同步 subprogramMethods；engine 自动 re-merge 聚合
+   translation.json。包级回退模式：直接更新 `translations/{pkg}/translation.json`）。判断 unit 归属：
+   mustFix 项的 file/方法对应哪个 unit（按 `analysis.json.functionOwnership` + 子程序→方法映射）。
+
+**unit 模式下定位 unit**：mustFix 通常带 file 路径或子程序名。按 file 反查所属包，再按子程序名（或方法名）
+反查 unit id（根 PROCEDURE，或拥有该 FUNCTION 的 owner）。若 mustFix 跨多 unit，逐一更新涉及的 per-unit 文件。
 
 **Mapper 集成测试修复场景**：
 - H2 不兼容的 SQL → 修复测试中的数据准备 SQL 或标 `@Disabled`
@@ -389,6 +444,7 @@ translation.json 包含：
 - [ ] fix.json 的 fixedPackages 覆盖所有失败包
 - [ ] fixedPackages 使用 inventory 中的 Oracle 原始包名
 - [ ] 修复遵循五原则，不引入新重构
+- [ ] unit 模式下受影响 unit 的 per-unit 文件已更新（聚合 translation.json 由 engine re-merge，不手写）
 - [ ] 更新了对应包的 translation.json
 - [ ] 修复后的代码仍遵循 Java 代码规约
 - [ ] 修复后的注释仍使用中文

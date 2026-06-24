@@ -91,3 +91,68 @@ describe("narrowUpstreamForShard", () => {
     expect(perPkgEntries).toEqual(["inventory-packages/ONLY_THIS_PKG.json"])
   })
 })
+
+describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", () => {
+  const baseUpstream = [
+    "inventory.json", "inventory-packages/*.json",
+    "plan.json", "analysis.json", "analysis-packages/*.json", "scaffold.json",
+    "fsd/*/*.md", "translations/*/translation.json",
+  ]
+
+  it("targetUnits 收窄到本分片 unit 的包 + 根 FSD", () => {
+    const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
+      targetUnits: ["PKG_A.create_order", "PKG_A.cancel_order"],
+      functionOwnership: {},
+    })
+    // 包去重
+    expect(result).toContain("inventory-packages/PKG_A.json")
+    expect(result).toContain("analysis-packages/PKG_A.json")
+    // 根 FSD
+    expect(result).toContain("fsd/PKG_A/create_order.md")
+    expect(result).toContain("fsd/PKG_A/cancel_order.md")
+    // 不再 glob
+    expect(result).not.toContain("fsd/*/*.md")
+    expect(result).not.toContain("inventory-packages/*.json")
+  })
+
+  it("cargo FUNCTION 的 FSD 按 functionOwnership 展开", () => {
+    // create_order 拥有 calc_total；cancel_order 无 cargo
+    const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
+      targetUnits: ["PKG_A.create_order", "PKG_A.cancel_order"],
+      functionOwnership: { "PKG_A.calc_total": "PKG_A.create_order" },
+    })
+    expect(result).toContain("fsd/PKG_A/create_order.md")
+    expect(result).toContain("fsd/PKG_A/calc_total.md") // cargo 展开
+    expect(result).toContain("fsd/PKG_A/cancel_order.md")
+  })
+
+  it("跨包 unit：包去重覆盖多个包", () => {
+    const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
+      targetUnits: ["PKG_A.p1", "PKG_B.p2"],
+      functionOwnership: {},
+    })
+    expect(result).toContain("inventory-packages/PKG_A.json")
+    expect(result).toContain("inventory-packages/PKG_B.json")
+    expect(result).toContain("fsd/PKG_A/p1.md")
+    expect(result).toContain("fsd/PKG_B/p2.md")
+  })
+
+  it("translations/*/translation.json 收窄到已完成 unit 所属包（聚合索引）", () => {
+    // 已完成 unit 在 PKG_A、PKG_B（unit id → 包）
+    const result = narrowUpstreamForShard(baseUpstream, "translate", [], ["PKG_A.p0", "PKG_B.q0"], {
+      targetUnits: ["PKG_C.p1"],
+      functionOwnership: {},
+    })
+    expect(result).toContain("translations/PKG_A/translation.json")
+    expect(result).toContain("translations/PKG_B/translation.json")
+    expect(result).not.toContain("translations/PKG_C/translation.json") // 当前包未完成，无聚合文件
+    expect(result).not.toContain("translations/*/translation.json")
+  })
+
+  it("无 targetUnits：回退包级模式（原逻辑）", () => {
+    const result = narrowUpstreamForShard(baseUpstream, "translate", ["PKG_A"], ["PKG_B"])
+    expect(result).toContain("inventory-packages/PKG_A.json")
+    expect(result).toContain("fsd/PKG_A/*.md")
+    expect(result).toContain("translations/PKG_B/translation.json")
+  })
+})

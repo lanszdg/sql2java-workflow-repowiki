@@ -117,3 +117,20 @@ describe("shardOrderForPhase（analyze/review 拍平 SCC，translate 保留）",
     ])
   })
 })
+
+describe("shardOrderForPhase（analyze PROCEDURE 级：unit 拍平）", () => {
+  // analyze 下沉到 PROCEDURE 级后，dispatch 传入 procedureOrder（unit id `PKG.refName`）。
+  // shardOrderForPhase 对 analyze 拍平 → 每 unit 一分片（同包多 unit 也拆开，FSD 独立产出可拆 SCC）。
+  const unitOrder = [
+    ["PKG_A.p1"],
+    ["PKG_A.p2", "PKG_A.p3"], // 同包 SCC 组（互递归 unit）
+    ["PKG_B.q1"],
+  ]
+
+  it("analyze: unit 级拍平 → 每 unit 一分片，SCC 组内 unit 也拆开", () => {
+    const shards = shardsFor(unitOrder, 1, "analyze")
+    expect(shards.length).toBe(4)
+    expect(shards.every(s => s.length === 1)).toBe(true)
+    expect(shards.flat()).toEqual(["PKG_A.p1", "PKG_A.p2", "PKG_A.p3", "PKG_B.q1"])
+  })
+})

@@ -254,11 +254,47 @@ export const AnalysisMetaSchema = z.object({
   })),
   sccGroups: z.array(z.array(z.string())),
   packageNames: z.array(z.string()),
+
+  /**
+   * PROCEDURE 级拓扑序（翻译单元层）。每层是一组 unit id（`PKG.refName`），依赖在前。
+   * unit = 一个 PROCEDURE，或一个「孤儿 FUNCTION」（同包内无 PROCEDURE 经 function 链调用它）。
+   * 被 owner PROCEDURE 拥有的 FUNCTION 不是独立 unit，不在本表，随 owner 翻译（见 functionOwnership）。
+   * translate 分片按本字段调度（取代包级 translationOrder）。optional：旧 run 无此字段时
+   * engine 回退到包级 translationOrder（向后兼容）。
+   */
+  procedureOrder: z.array(z.array(z.string())).optional(),
+
+  /**
+   * FUNCTION 属主归属：`PKG.funcRefName` → `PKG.ownerProcRefName`（同包内）。
+   * 仅含「被某个 PROCEDURE 拥有」的 FUNCTION；孤儿 FUNCTION 不入表（它们自身是 unit）。
+   * 属主判定：同包内反向可达的 PROCEDURE 集合；恰 1 个→归它，≥2 个→调用次数最多者
+   * （并列取 refName 字典序最小），0 个→孤儿。跨包调用不建立属主。
+   * 供 translate 收窄 FSD（owner 单元的 cargo FUNCTION）+ 审计。
+   */
+  functionOwnership: z.record(z.string(), z.string()).optional(),
 }).passthrough()
 
-/** analysis-packages/{pkg}.json — 逐包子程序结构 */
+/** analysis-packages/{pkg}.json — 逐包子程序结构（聚合，由 engine mergeUnitAnalysis 产出） */
 export const AnalysisPackageSchema = z.object({
   packageName: z.string(),
+  subprograms: z.array(SubprogramSchema),
+}).passthrough()
+
+/**
+ * analysis-packages/{pkg}/{unitRef}.json — PROCEDURE 级 analyze 产物（per-unit）。
+ *
+ * analyze 下沉到 PROCEDURE 级后，一个 unit = 一个 PROCEDURE（或孤儿 FUNCTION）+ 其 cargo FUNCTION。
+ * agent 只写本 unit 的 per-procedure 文件（根 + cargo 的 subprogram 结构）；engine 在每个 analyze
+ * 分片 advance 后 merge 同包所有 per-unit 文件 → 聚合 `analysis-packages/{pkg}.json`
+ * （AnalysisPackageSchema），下游 plan/review/translator 读聚合，形状不变。
+ *
+ * 与 [[translate-procedure-level]] 的 UnitTranslationSchema 同模式（per-unit + engine merge）。
+ */
+export const UnitAnalysisSchema = z.object({
+  /** unit 根子程序的 refName（PROCEDURE 或孤儿 FUNCTION），与文件名 {unitRef}.json 一致 */
+  unitRefName: z.string(),
+  packageName: z.string(),
+  /** 本单元子程序结构（根 + cargo FUNCTION），merge 后并入聚合 subprograms */
   subprograms: z.array(SubprogramSchema),
 }).passthrough()
 
@@ -387,6 +423,16 @@ export const TranslationSchema = z.object({
   completedSubprograms: z.array(z.string()),
   totalSubprograms: z.coerce.number(),
 
+  /**
+   * PROCEDURE 级单元完成度 rollup（由 engine merge per-unit 文件聚合，非 agent 直接写）。
+   * 每项 { refName=unit 根子程序 refName, status }。status: completed|partial。
+   * 翻译下沉到 PROCEDURE 级后，本文件 = 聚合视图；逐单元产物在 translations/{pkg}/{unitRef}.json。
+   */
+  units: z.array(z.object({
+    refName: z.string(),
+    status: z.string(),
+  })).optional(),
+
   files: z.array(z.object({
     path: z.string(),
     role: z.string(),
@@ -421,6 +467,56 @@ export const TranslationSchema = z.object({
    * - javaMethod：Java 方法名（Service 接口上的方法名）。
    * - javaFile：Service 接口文件相对路径（可选，便于定位）。
    */
+  subprogramMethods: z.array(z.object({
+    oracleName: z.string(),
+    javaClass: z.string(),
+    javaMethod: z.string(),
+    javaFile: z.string().nullable().optional(),
+  })).refine(
+    (methods) => new Set(methods.map((m) => m.oracleName.toUpperCase())).size === methods.length,
+    { message: "subprogramMethods.oracleName 必须唯一（重载子程序用 {name}__序号 区分，禁用裸名重复）" },
+  ).default([]),
+}).passthrough()
+
+// ============================================================================
+// Unit Translation Schema（每 PROCEDURE 单元一个，translate 下沉到 PROCEDURE 级）
+// ============================================================================
+
+/**
+ * per-unit 翻译产物：`translations/{pkg}/{unitRef}.json`。
+ *
+ * unit = 一个 PROCEDURE（主）或孤儿 FUNCTION；被 owner 拥有的 FUNCTION 是 owner 单元的
+ * cargo，随 owner 在同一分片翻译，其方法登记在本单元的 subprogramMethods。
+ *
+ * engine 在每个 translate 分片 advance 后 merge 同包所有 per-unit 文件 → 聚合
+ * `translations/{pkg}/translation.json`（TranslationSchema），后者是跨包调用对接的稳定契约。
+ * agent 只写本 per-unit 文件，不直接写聚合 translation.json。
+ */
+export const UnitTranslationSchema = z.object({
+  /** unit 根子程序的 refName（PROCEDURE 或孤儿 FUNCTION），与文件名 {unitRef}.json 一致 */
+  unitRefName: z.string(),
+  packageName: z.string(),
+  status: z.string(),
+  /** 本单元已完成的子程序 refName（根 + cargo FUNCTION） */
+  completedSubprograms: z.array(z.string()),
+  files: z.array(z.object({
+    path: z.string(),
+    role: z.string(),
+  })),
+  decisions: z.array(z.object({
+    line: z.coerce.number(),
+    oracleConstruct: z.string(),
+    javaConstruct: z.string(),
+    reason: z.string(),
+    confidence: z.string(),
+  })),
+  todos: z.array(z.object({
+    file: z.string(),
+    issue: z.string(),
+    oracleLine: z.coerce.number(),
+    suggestion: z.string(),
+  })),
+  /** 本单元子程序（根 + cargo FUNCTION）→ Java 调用入口索引；merge 后并入聚合 translation.json */
   subprogramMethods: z.array(z.object({
     oracleName: z.string(),
     javaClass: z.string(),
@@ -692,6 +788,18 @@ export function getPerPackageSchema(phase: string): ZodType | null {
   const schemaMap: Record<string, ZodType> = {
     translate: TranslationSchema,
     review: ReviewSchema,
+  }
+  return schemaMap[phase] ?? null
+}
+
+/**
+ * 根据阶段名查找 per-unit schema（PROCEDURE 级翻译产物校验）。
+ * translate 下沉到 PROCEDURE 级后，逐单元产物 translations/{pkg}/{unitRef}.json 用此 schema。
+ */
+export function getPerUnitSchema(phase: string): ZodType | null {
+  const schemaMap: Record<string, ZodType> = {
+    analyze: UnitAnalysisSchema,
+    translate: UnitTranslationSchema,
   }
   return schemaMap[phase] ?? null
 }

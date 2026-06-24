@@ -65,3 +65,22 @@ export function parseQualified(qualified: string): [string, string] | null {
   if (idx <= 0 || idx >= qualified.length - 1) return null
   return [qualified.slice(0, idx), qualified.slice(idx + 1)]
 }
+
+/**
+ * 从 unit id `PKG.refName` 取包名（宽松版，按首个 `.` 切分）。
+ * 无 `.` 时返回原串（用于已保证合法的 unit id 热路径，避免 null 检查）。
+ * 需要严格校验非法格式时用 parseQualified。
+ *
+ * 与 refOf 配对，取代散落在 workflow-engine / engine-core / analysis-builder 的
+ * `const i = u.indexOf("."); return i < 0 ? u : u.slice(...)` 内联闭包（单一真相源）。
+ */
+export function pkgOf(unitId: string): string {
+  const i = unitId.indexOf(".")
+  return i < 0 ? unitId : unitId.slice(0, i)
+}
+
+/** 从 unit id `PKG.refName` 取 refName（宽松版，按首个 `.` 切分）。无 `.` 时返回原串。 */
+export function refOf(unitId: string): string {
+  const i = unitId.indexOf(".")
+  return i < 0 ? unitId : unitId.slice(i + 1)
+}

@@ -94,9 +94,12 @@ describe("renderSchemaHint", () => {
     expect(hint).toContain("### inventory.json")
   })
 
-  it("analyze 阶段包含 per-package schema（AnalysisPackageSchema）", () => {
+  it("analyze 阶段包含 per-unit schema（UnitAnalysisSchema，PROCEDURE 级下沉）", () => {
     const hint = renderSchemaHint("analyze")
-    expect(hint).toContain("analysis-packages/{pkg}.json")
+    expect(hint).toContain("analysis-packages/{pkg}/{unitRef}.json")
+    expect(hint).toContain("unitRefName")
+    // 聚合 analysis-packages/{pkg}.json 由 engine merge（非 agent 手写），不渲染
+    expect(hint).not.toContain("Per-Package: analysis-packages/{pkg}.json")
   })
 
   it("translate/review/verify 阶段包含 per-package schema", () => {
@@ -347,9 +350,9 @@ describe("renderSchemaHint — 约束完整性（anyOf/nullable/string 长度）
     expect(hint).not.toMatch(/###\s*analysis\.json/)
   })
 
-  it("analyze 阶段保留 per-package analysis-packages schema（worker 手写）", () => {
+  it("analyze 阶段保留 per-unit analysis-packages schema（worker 手写 per-unit 文件）", () => {
     const hint = renderSchemaHint("analyze")
-    expect(hint).toContain("analysis-packages/{pkg}.json")
+    expect(hint).toContain("analysis-packages/{pkg}/{unitRef}.json")
   })
 
   it("inventory 阶段顶层 schema 仍渲染", () => {
