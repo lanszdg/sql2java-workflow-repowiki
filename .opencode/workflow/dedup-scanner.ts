@@ -111,15 +111,59 @@ function matchFileMeta(cpdPath: string, idx: Map<string, FileMeta>, projectRoot:
   return null
 }
 
-// ── PMD CPD 执行 ──────────────────────────────────────────────────────────────
+// ── 工具链版本基线 ────────────────────────────────────────────────────────────
+// 以「最低可运行版本」为准，所有 mvn 驱动的阶段（dedup 的 pmd:cpd、verify 的 compile/test）
+// 必须能在该基线跑。JDK 8 = 生成项目目标（java-code-spec.md）；Maven 3.5 = Spring Boot 2.7
+// 的最低要求（maven-pmd-plugin 3.21.2 仅需 3.2.5，3.5 为绑定最低）。maven-pmd-plugin 3.21.2
+// 自带 PMD 6.55.0，最低 JDK 8；若将来 java-code-spec 把目标升到 17+，需把插件提到 3.22+
+// （自带 PMD 7.x，支持 Java 17/21 语法）。
+export const MIN_JDK = 8
+export const MIN_MAVEN: readonly [number, number, number] = [3, 5, 0]
 
-/** 检测 mvn 是否可用 */
-function mvnAvailable(): boolean {
-  try { execSync("mvn --version", { stdio: "pipe" }); return true } catch { return false }
+export function parseMavenVersion(out: string): [number, number, number] | null {
+  const m = /Apache Maven (\d+)\.(\d+)\.(\d+)/.exec(out)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
 }
 
+/** mvn --version 输出 "Java version: 1.8.0_292" 或 "Java version: 17.0.1" → 主版本号 */
+export function parseJavaMajor(out: string): number | null {
+  const m = /Java version:\s+(\d+)(?:\.(\d+))?/.exec(out)
+  if (!m) return null
+  const first = Number(m[1])
+  const second = m[2] ? Number(m[2]) : 0
+  return first === 1 ? second : first // 1.8 → 8；17 → 17
+}
+
+export function cmpVersion(a: readonly [number, number, number], b: readonly [number, number, number]): number {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]
+  return 0
+}
+
+/** 校验 JDK + Maven 是否达最低基线（mvn --version 一次性给两者版本） */
+export function checkToolchain(): { ok: boolean; maven?: string; java?: string; reason?: string } {
+  let out: string
+  try {
+    out = execSync("mvn --version", { stdio: "pipe", encoding: "utf-8", timeout: 15_000 })
+  } catch {
+    return { ok: false, reason: "mvn 不在 PATH（verify/dedup 均依赖 mvn）" }
+  }
+  const mvn = parseMavenVersion(out)
+  const jdk = parseJavaMajor(out)
+  if (!mvn) return { ok: false, reason: "无法解析 mvn --version 的 Maven 版本" }
+  if (!jdk) return { ok: false, reason: "无法解析 mvn --version 的 Java 版本" }
+  if (cmpVersion(mvn, MIN_MAVEN) < 0) {
+    return { ok: false, maven: mvn.join("."), java: String(jdk), reason: `Maven ${mvn.join(".")} 低于最低要求 ${MIN_MAVEN.join(".")}（Spring Boot 2.7 要求 Maven 3.5+）` }
+  }
+  if (jdk < MIN_JDK) {
+    return { ok: false, maven: mvn.join("."), java: String(jdk), reason: `JDK ${jdk} 低于最低要求 JDK ${MIN_JDK}` }
+  }
+  return { ok: true, maven: mvn.join("."), java: String(jdk) }
+}
+
+// ── PMD CPD 执行 ──────────────────────────────────────────────────────────────
+
 /**
- * 跑 mvn pmd:cpd，返回 CPD XML 内容。mvn 不可用/执行失败/无输出 → null（调用方走跳过）。
+ * 跑 mvn pmd:cpd，返回 CPD XML 内容。工具链不达基线/无 pom/执行失败/无输出 → null（调用方走跳过）。
  * 跨平台：mvn 自身跨平台；不下载 PMD dist（Maven 自动下载插件缓存 ~/.m2）。
  */
 export function runPmdCpd(projectRoot: string): { xml: string } | null {
@@ -127,8 +171,9 @@ export function runPmdCpd(projectRoot: string): { xml: string } | null {
     getLogger().warn("[dedup-scanner]", `projectRoot=${projectRoot} 下无 pom.xml，跳过 PMD CPD`)
     return null
   }
-  if (!mvnAvailable()) {
-    getLogger().warn("[dedup-scanner]", "mvn 不在 PATH（verify 阶段亦依赖 mvn），跳过 dedup 检测")
+  const tc = checkToolchain()
+  if (!tc.ok) {
+    getLogger().warn("[dedup-scanner]", `工具链不达基线，跳过 dedup 检测：${tc.reason}`)
     return null
   }
   const cmd = `mvn -q -o=false ${PMD_PLUGIN_COORD}:cpd -DminimumTokens=${MIN_TOKENS} -Dformat=xml -Dlanguage=java`

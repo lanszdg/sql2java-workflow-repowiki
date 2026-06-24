@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { parseCpdXml, applyRules, buildFileIndex, type DupGroup } from "@workflow/dedup-scanner"
+import { parseCpdXml, applyRules, buildFileIndex, parseMavenVersion, parseJavaMajor, cmpVersion, MIN_JDK, MIN_MAVEN, type DupGroup } from "@workflow/dedup-scanner"
 
 let dir: string
 beforeAll(() => { dir = mkdtempSync(join(tmpdir(), "dedup-scan-")) })
@@ -145,5 +145,29 @@ describe("buildFileIndex", () => {
     const idx = buildFileIndex(art, projectRoot, ["PKG_A"])
     expect(idx.size).toBe(1)
     expect([...idx.values()][0].packageName).toBe("PKG_A")
+  })
+})
+
+describe("toolchain 版本基线", () => {
+  it("基线常量：JDK 8 + Maven 3.5.0", () => {
+    expect(MIN_JDK).toBe(8)
+    expect([...MIN_MAVEN]).toEqual([3, 5, 0])
+  })
+
+  it("parseMavenVersion：从 mvn --version 输出取 X.Y.Z", () => {
+    const out = `Apache Maven 3.6.3 (cecedd343002696d0abb50b32b541b8a6ba2883f)\nMaven home: /usr/share/maven\nJava version: 1.8.0_292, vendor: Private Build`
+    expect(parseMavenVersion(out)).toEqual([3, 6, 3])
+  })
+
+  it("parseJavaMajor：1.8.0_292 → 8；17.0.1 → 17", () => {
+    expect(parseJavaMajor("Java version: 1.8.0_292, vendor: X")).toBe(8)
+    expect(parseJavaMajor("Java version: 17.0.1, vendor: X")).toBe(17)
+    expect(parseJavaMajor("Java version: 11.0.20, vendor: X")).toBe(11)
+  })
+
+  it("cmpVersion：基线判定（3.5.0 是最低，3.4.x 不达；3.6.3 达标）", () => {
+    expect(cmpVersion([3, 5, 0], MIN_MAVEN)).toBe(0) // 等于基线 → 达标
+    expect(cmpVersion([3, 6, 3], MIN_MAVEN)).toBeGreaterThan(0) // 高于 → 达标
+    expect(cmpVersion([3, 4, 9], MIN_MAVEN)).toBeLessThan(0) // 低于 → 不达标
   })
 })
