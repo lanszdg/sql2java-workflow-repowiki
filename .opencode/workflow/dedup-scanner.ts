@@ -176,12 +176,16 @@ export function runPmdCpd(projectRoot: string): { xml: string } | null {
     getLogger().warn("[dedup-scanner]", `工具链不达基线，跳过 dedup 检测：${tc.reason}`)
     return null
   }
-  const cmd = `mvn -q -o=false ${PMD_PLUGIN_COORD}:cpd -DminimumTokens=${MIN_TOKENS} -Dformat=xml -Dlanguage=java`
+  // 注意：Maven 的 -o 是离线开关（toggle），不是 key=value。-o=false 是无效语法，Maven 会把
+  // "false" 当 lifecycle phase 报 "Unknown lifecycle phase" 立即退出。在线是默认，无需任何 flag。
+  const cmd = `mvn -q ${PMD_PLUGIN_COORD}:cpd -DminimumTokens=${MIN_TOKENS} -Dformat=xml -Dlanguage=java`
   try {
-    execSync(cmd, { cwd: projectRoot, stdio: "pipe", timeout: 300_000 })
+    execSync(cmd, { cwd: projectRoot, stdio: "pipe", timeout: 300_000, encoding: "utf-8" })
   } catch (e: any) {
-    // mvn 非零退出但仍可能产出 cpd.xml（如部分文件扫描告警）；无 xml 才视为失败
-    getLogger().warn("[dedup-scanner]", `mvn pmd:cpd 退出码非零（${e.message?.split("\n")[0]}），尝试读取已有 cpd.xml`)
+    // mvn 非零退出但仍可能产出 cpd.xml（如部分文件扫描告警）；记录 stderr 摘要便于诊断，无 xml 才视为失败
+    const stderr = String(e.stderr || e.stdout || "")
+    const tail = stderr.split("\n").filter((l: string) => l.trim()).slice(-5).join(" | ")
+    getLogger().warn("[dedup-scanner]", `mvn pmd:cpd 失败：${tail || e.message?.split("\n")[0]}；尝试读取已有 cpd.xml`)
   }
   const cpdXml = join(projectRoot, "target", "cpd.xml")
   if (!existsSync(cpdXml)) {
