@@ -99,20 +99,23 @@ describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", 
     "fsd/*/*.md", "translations/*/translation.json",
   ]
 
-  it("targetUnits 收窄到本分片 unit 的包 + 根 FSD", () => {
+  it("targetUnits → per-unit 切片 + 根 FSD；整包 inventory/analysis-packages 不再注入", () => {
     const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
       targetUnits: ["PKG_A.create_order", "PKG_A.cancel_order"],
       functionOwnership: {},
     })
-    // 包去重
-    expect(result).toContain("inventory-packages/PKG_A.json")
-    expect(result).toContain("analysis-packages/PKG_A.json")
+    // per-unit 切片（source.sql + analysis-slice.json + meta.json）
+    expect(result).toContain("shard-inputs/PKG_A/create_order/source.sql")
+    expect(result).toContain("shard-inputs/PKG_A/create_order/analysis-slice.json")
+    expect(result).toContain("shard-inputs/PKG_A/cancel_order/source.sql")
     // 根 FSD
     expect(result).toContain("fsd/PKG_A/create_order.md")
     expect(result).toContain("fsd/PKG_A/cancel_order.md")
-    // 不再 glob
-    expect(result).not.toContain("fsd/*/*.md")
+    // 整包不再注入（硬隔离）
+    expect(result).not.toContain("inventory-packages/PKG_A.json")
+    expect(result).not.toContain("analysis-packages/PKG_A.json")
     expect(result).not.toContain("inventory-packages/*.json")
+    expect(result).not.toContain("fsd/*/*.md")
   })
 
   it("cargo FUNCTION 的 FSD 按 functionOwnership 展开", () => {
@@ -126,26 +129,26 @@ describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", 
     expect(result).toContain("fsd/PKG_A/cancel_order.md")
   })
 
-  it("跨包 unit：包去重覆盖多个包", () => {
+  it("跨包 unit：切片覆盖多个包", () => {
     const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
       targetUnits: ["PKG_A.p1", "PKG_B.p2"],
       functionOwnership: {},
     })
-    expect(result).toContain("inventory-packages/PKG_A.json")
-    expect(result).toContain("inventory-packages/PKG_B.json")
+    expect(result).toContain("shard-inputs/PKG_A/p1/source.sql")
+    expect(result).toContain("shard-inputs/PKG_B/p2/source.sql")
     expect(result).toContain("fsd/PKG_A/p1.md")
     expect(result).toContain("fsd/PKG_B/p2.md")
   })
 
-  it("translations/*/translation.json 收窄到已完成 unit 所属包（聚合索引）", () => {
-    // 已完成 unit 在 PKG_A、PKG_B（unit id → 包）
+  it("translations/*/translation.json 在 translate unit 模式下清空（依赖签名预注入）", () => {
+    // 依赖改由 buildDependencySignaturesBlock 预注入，translations glob 清空
     const result = narrowUpstreamForShard(baseUpstream, "translate", [], ["PKG_A.p0", "PKG_B.q0"], {
       targetUnits: ["PKG_C.p1"],
       functionOwnership: {},
     })
-    expect(result).toContain("translations/PKG_A/translation.json")
-    expect(result).toContain("translations/PKG_B/translation.json")
-    expect(result).not.toContain("translations/PKG_C/translation.json") // 当前包未完成，无聚合文件
+    expect(result).not.toContain("translations/PKG_A/translation.json")
+    expect(result).not.toContain("translations/PKG_B/translation.json")
+    expect(result).not.toContain("translations/PKG_C/translation.json")
     expect(result).not.toContain("translations/*/translation.json")
   })
 
@@ -154,5 +157,36 @@ describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", 
     expect(result).toContain("inventory-packages/PKG_A.json")
     expect(result).toContain("fsd/PKG_A/*.md")
     expect(result).toContain("translations/PKG_B/translation.json")
+  })
+})
+
+describe("narrowUpstreamForShard — analyze PROCEDURE 级（unit 模式，Phase 1 切片）", () => {
+  const baseUpstream = ["inventory.json", "inventory-packages/*.json", "analysis.json"]
+
+  it("targetUnits → inventory-packages/*.json 替换为 per-unit 切片文件", () => {
+    const result = narrowUpstreamForShard(baseUpstream, "analyze", [], [], {
+      targetUnits: ["PKG_A.proc1", "PKG_A.proc2"],
+      functionOwnership: {},
+    })
+    // 每个 unit 的切片三件套
+    expect(result).toContain("shard-inputs/PKG_A/proc1/source.sql")
+    expect(result).toContain("shard-inputs/PKG_A/proc1/inventory-slice.json")
+    expect(result).toContain("shard-inputs/PKG_A/proc1/meta.json")
+    expect(result).toContain("shard-inputs/PKG_A/proc2/source.sql")
+    // 整包 inventory-packages 不再注入（硬隔离：worker 看不到同包其他 proc）
+    expect(result).not.toContain("inventory-packages/PKG_A.json")
+    expect(result).not.toContain("inventory-packages/*.json")
+    // 全局只读 artifact 保留（表 DDL + callGraph meta）
+    expect(result).toContain("inventory.json")
+    expect(result).toContain("analysis.json")
+  })
+
+  it("跨包 unit：切片覆盖多个包", () => {
+    const result = narrowUpstreamForShard(baseUpstream, "analyze", [], [], {
+      targetUnits: ["PKG_A.p1", "PKG_B.p2"],
+      functionOwnership: {},
+    })
+    expect(result).toContain("shard-inputs/PKG_A/p1/source.sql")
+    expect(result).toContain("shard-inputs/PKG_B/p2/source.sql")
   })
 })

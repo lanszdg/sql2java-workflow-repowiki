@@ -112,8 +112,8 @@ export interface PhaseHistoryEntry {
   retryCount: number                            // 每次 retry 递增，与 PhaseConfig.maxRetries 比较
   branchedFrom?: string                         // fix 记录触发阶段；fix 回来的 entry 记录 "fix"
   incrementalContext?: {
-    targetPackages: string[]                    // 增量模式：只处理这些包（analyze/review 包级分片）
-    targetUnits?: string[]                      // translate PROCEDURE 级分片：只处理这些 unit id（PKG.refName）
+    targetPackages?: string[]                   // 增量模式：只处理这些包（analyze/review 包级分片）
+    targetUnits?: string[]                      // translate/analyze PROCEDURE 级分片：只处理这些 unit id（PKG.refName）
     shardIndex?: number                         // 分片模式：当前分片序号（0-based）
     totalShards?: number                        // 分片模式：总分片数
     previousFindings?: Array<{                  // 增量 review：上次 review 的 mustFix，供 reviewer 核对是否已修复
@@ -370,22 +370,24 @@ export class WorkflowEngine {
         run.updatedAt = now
 
         const nextShard = shardPlan.shards[nextShardIndex]
+        // unit 模式（analyze/translate PROCEDURE 级）shard 元素是 unit id `PKG.ref`，须写入 targetUnits
+        // 而非 targetPackages——否则下游 narrowUpstreamForShard / generateUnitSlices / 写入边界因 targetUnits
+        // 为空全部跳过，shard 1+ 退化为整包处理（硬隔离失效）。包级模式才用 targetPackages。
         const newEntry: PhaseHistoryEntry = {
           phase: run.currentPhase!,
           status: "in_progress",
           startedAt: now,
           retryCount: 0,
-          incrementalContext: {
-            targetPackages: nextShard,
-            shardIndex: nextShardIndex,
-            totalShards,
-          },
+          incrementalContext: shardPlan.unitMode
+            ? { targetUnits: nextShard, shardIndex: nextShardIndex, totalShards }
+            : { targetPackages: nextShard, shardIndex: nextShardIndex, totalShards },
         }
         run.phaseHistory.push(newEntry)
         run.metadata.shardPlan = shardPlan
         this.persist(run)
+        const shardLabel = shardPlan.unitMode ? "unit" : "包"
         this.appendEvent(runId, "SHARD_ADVANCE", run.currentPhase!,
-          `分片 ${currentShardIndex + 1}/${totalShards} 完成 → 分片 ${nextShardIndex + 1}/${totalShards} (包: ${nextShard.join(", ")})`)
+          `分片 ${currentShardIndex + 1}/${totalShards} 完成 → 分片 ${nextShardIndex + 1}/${totalShards} (${shardLabel}: ${nextShard.join(", ")})`)
 
         return {
           run,
@@ -1500,10 +1502,12 @@ export class WorkflowEngine {
         crossSchemaWarnings,
       }
     }
-    const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean }> }).packageResults ?? []
+    const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean; staticPassed?: boolean | null }> }).packageResults ?? []
+    // 失败包 = 语义未过(!passed) 或 静态未过(staticPassed===false)。后者由 review 静态重构引入
+    // （review.json 纯语义、静态 finding 走独立通道），若不纳入 fix 范围会导致静态问题永不修复+不重扫→死循环。
     const failedPackages = new Set(
       pkgResults
-        .filter(p => !p.passed && typeof p.packageName === "string" && p.packageName)
+        .filter(p => typeof p.packageName === "string" && p.packageName && (!p.passed || p.staticPassed === false))
         .map(p => p.packageName.toUpperCase())
     )
     const fixedUpper = new Set(
@@ -1546,27 +1550,30 @@ export class WorkflowEngine {
     }
     // B-minimal: 增量 review 时把上次 review 的 mustFix 注入 previousFindings，
     // 让 reviewer 先核对旧问题是否修复（机制化核对，保证 fix 没修好的问题不被遗忘）。
+    // review 改项目级单文件：从 artifactsDir/review.json 的 packages[] 过滤 fixedPackages 收集 mustFix。
     let previousFindings: Array<{ packageName: string; file: string; line?: number | null; issue: string }> | undefined
     if (nextPhase === "review" && triggerPhase === "review") {
       const collected: Array<{ packageName: string; file: string; line?: number | null; issue: string }> = []
-      for (const pkg of fixedPackages) {
-        const reviewPath = join(artifactsDir, "translations", pkg, "review.json")
-        try {
-          const raw = JSON.parse(readFileSync(reviewPath, "utf-8")) as {
-            mustFix?: Array<{ file?: unknown; line?: unknown; issue?: unknown }>
-          }
-          for (const f of raw.mustFix ?? []) {
+      const fixedUpper = new Set(fixedPackages.map(p => p.toUpperCase()))
+      try {
+        const raw = JSON.parse(readFileSync(join(artifactsDir, "review.json"), "utf-8")) as {
+          packages?: Array<{ packageName?: unknown; mustFix?: Array<{ file?: unknown; line?: unknown; issue?: unknown }> }>
+        }
+        for (const pkg of raw.packages ?? []) {
+          if (!pkg || typeof pkg.packageName !== "string") continue
+          if (!fixedUpper.has(pkg.packageName.toUpperCase())) continue
+          for (const f of pkg.mustFix ?? []) {
             if (f && typeof f.file === "string" && typeof f.issue === "string") {
               collected.push({
-                packageName: pkg,
+                packageName: pkg.packageName,
                 file: f.file,
                 line: typeof f.line === "number" ? f.line : null,
                 issue: f.issue,
               })
             }
           }
-        } catch { /* review.json 不存在或解析失败：跳过该包，无 previousFindings 不阻断 */ }
-      }
+        }
+      } catch { /* review.json 不存在或解析失败：无 previousFindings 不阻断 */ }
       previousFindings = collected.length > 0 ? collected : undefined
     }
 

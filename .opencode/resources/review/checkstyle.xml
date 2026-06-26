@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+  "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+  "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<!--
+  sql2java review 静态扫描 — Checkstyle 规则（#11 命名 / #12 格式 / #15 部分）。
+  引擎自带，review-scanner.ts 用绝对路径传 -Dcheckstyle.config.location。
+  pinned Checkstyle 9.3（JDK 8 兼容；maven-checkstyle-plugin 3.3.1 默认 10.x 需 JDK 11+）。
+  保守选规则：避免 brittle 规则（Indentation/Javadoc）导致整次扫描失败。#14 中文注释归 grep 脚本。
+-->
+<module name="Checker">
+  <property name="charset" value="UTF-8"/>
+  <property name="severity" value="warning"/>
+  <property name="fileExtensions" value="java"/>
+
+  <module name="FileTabCharacter"/>
+  <module name="LineLength">
+    <property name="max" value="120"/>
+    <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
+  </module>
+
+  <module name="TreeWalker">
+    <!-- #11 命名规约 -->
+    <module name="PackageName"/>
+    <module name="TypeName"/>
+    <module name="ConstantName"/>
+    <module name="MethodName"/>
+    <module name="MemberName"/>
+    <module name="ParameterName"/>
+    <module name="LocalVariableName"/>
+
+    <!-- #12 代码格式 / #15 空块 -->
+    <module name="EmptyBlock"/>
+    <module name="EmptyStatement"/>
+    <module name="NeedBraces"/>
+    <module name="LeftCurly"/>
+    <module name="RightCurly"/>
+    <module name="WhitespaceAround"/>
+    <module name="MethodParamPad"/>
+    <module name="ParenPad"/>
+    <module name="MultipleVariableDeclarations"/>
+  </module>
+</module>

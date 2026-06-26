@@ -221,7 +221,12 @@ export function assertCheckFound(
   for (const [key, val] of Object.entries(ctx.artifacts)) {
     if (!key.endsWith("/review.json") && key !== "review.json") continue
     const review = val as ReviewArtifact
-    for (const pr of review.procedureReviews ?? []) {
+    // review 改项目级单文件：review.json = { packages: [{ procedureReviews, ... }] }。
+    // 兼容旧 per-package 形状（直接 procedureReviews）。
+    const pkgReviews = (review as any).packages
+      ? ((review as any).packages as Array<{ procedureReviews?: ReviewArtifact["procedureReviews"] }>).flatMap(p => p.procedureReviews ?? [])
+      : (review.procedureReviews ?? [])
+    for (const pr of pkgReviews) {
       for (const c of pr.checks ?? []) {
         if (c.category === category && c.passed === false && severityRank(c.severity) >= minRank) {
           found.push({ key, procedure: pr.procedure ?? "?", severity: c.severity ?? "?", detail: c.detail ?? "" })

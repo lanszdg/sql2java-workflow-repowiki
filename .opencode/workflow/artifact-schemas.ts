@@ -576,23 +576,80 @@ export const ReviewSchema = z.object({
 )
 
 // ============================================================================
+// Project Review Schema（项目级，review.json 顶层产物）
+// ============================================================================
+
+// review 改项目级单次审核后，reviewer 一次写一个 artifactsDir/review.json，packages[] 覆盖全部包。
+// 每个 package 条目复用 ReviewSchema（含 passed↔mustFix refine）。静态 finding 不在此（走 review-static.json）。
+// fix 回环时 reviewer 读现有 review.json、只改 fixedPackages 条目、保留其余、写回完整文件。
+export const ProjectReviewSchema = z.object({
+  packages: z.array(ReviewSchema),
+}).passthrough()
+
+// ============================================================================
 // Review Summary Schema（顶层汇总）
 // ============================================================================
 
+// review 静态审核重构（[[dedup-static-analysis]] 邻接方案）：review.json 保持纯语义，
+// 静态 finding 存 review-static.json（项目级，确定性）。summary 合并两路：per-package
+// `passed`=语义、`staticPassed`=静态（无 critical/major 静态 finding）。allPassed 须同时满足。
+// 注意：不复用共享 allPassedRefine（verify 仍用旧语义），review 用下方专属 refine。
 export const ReviewSummarySchema = z.object({
   allPassed: z.boolean(),
   packageResults: z.array(z.object({
     packageName: z.string(),
     passed: z.boolean(),
+    /** 静态扫描是否通过（无 critical/major 静态 finding）。optional：旧 run/无静态产物时视为 true */
+    staticPassed: z.boolean().nullable().optional(),
     score: z.coerce.number(),
     mustFixCount: z.coerce.number(),
   })),
   totalMustFix: z.coerce.number(),
   totalTodosRemaining: z.coerce.number(),
+  /** 静态 finding 总数（全部包，含 UNKNOWN）。与 totalMustFix(语义) 分开计，避免触发 G4 */
+  totalStaticFindings: z.coerce.number().optional(),
 }).passthrough().refine(
-  allPassedRefine.check,
-  { message: allPassedRefine.message }
+  (data) => data.allPassed === data.packageResults.every(p => p.passed && (p.staticPassed ?? true)),
+  { message: "allPassed 应与 packageResults 一致（passed && staticPassed；staticPassed 缺省视为 true）" }
 )
+
+// ============================================================================
+// Review Static Schema（项目级，Step A 确定性扫描产物 review-static.json）
+// ============================================================================
+
+/** 单条静态 finding：工具/grep 脚本扫出的规约/机械类问题（20 类清单 #10-#20） */
+export const ReviewStaticFindingSchema = z.object({
+  /** 相对 projectRoot 的文件路径 */
+  file: z.string(),
+  line: z.coerce.number().nullable().optional(),
+  /** 规则 id（checkstyle/pmd rule 名，或 grep 脚本名） */
+  rule: z.string(),
+  /** critical/major/minor/info */
+  severity: z.string(),
+  /** 映射 20 类清单 category，如 naming-convention/code-format/version-compliance */
+  category: z.string(),
+  /** 来源工具：checkstyle/pmd/todo/comment/java9api/mybatis/type-mapping/naming/test-completeness */
+  tool: z.string(),
+  /** 归因到的 Oracle 包名；归因失败为 "UNKNOWN"（进 __unattributed__ 桶，仍注入 fix） */
+  packageName: z.string(),
+  message: z.string(),
+}).passthrough()
+
+export const ReviewStaticSchema = z.object({
+  findings: z.array(ReviewStaticFindingSchema).default([]),
+  /** per-tool 跳过标记：mvn 不可用时 checkstyle/pmd=true，reviewer 据此回退 LLM 审 */
+  toolSkipped: z.object({
+    checkstyle: z.boolean().default(false),
+    pmd: z.boolean().default(false),
+  }).passthrough(),
+  /** full=全项目首扫，incremental=fix 回环重扫 fixedPackages 后合并 */
+  scanMode: z.enum(["full", "incremental"]).default("full"),
+  generatedAt: z.string().optional(),
+  scanStats: z.object({
+    totalPackages: z.number(),
+    totalFilesScanned: z.number(),
+  }).passthrough().optional(),
+}).passthrough()
 
 // ============================================================================
 // Verify Schema（每包一个）
@@ -823,6 +880,8 @@ export function getSchemaForPhase(phase: string): ZodType | null {
     plan: PlanSchema,
     scaffold: ScaffoldSchema,
     dedup: DedupSchema,
+    // review 改项目级单文件：review.json 顶层产物（packages[] 覆盖全部包）
+    review: ProjectReviewSchema,
     fix: FixArtifactSchema,
   }
   return schemaMap[phase] ?? null
@@ -837,9 +896,9 @@ export function getInventoryPackageSchema(): ZodType {
 export function getPerPackageSchema(phase: string): ZodType | null {
   // verify 不再产 per-package verify.json——静态检查归 review，动态结果（编译/测试归因）
   // 落在 verify-summary.json.packageResults。VerifySchema 保留定义备查但不再用于逐包校验。
+  // review 改项目级单文件 review.json（packages[]），不再有 per-package review.json。
   const schemaMap: Record<string, ZodType> = {
     translate: TranslationSchema,
-    review: ReviewSchema,
   }
   return schemaMap[phase] ?? null
 }

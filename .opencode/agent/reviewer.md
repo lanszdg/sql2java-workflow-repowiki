@@ -43,14 +43,21 @@ permission:
 - **review** 阶段：完成后输出 WORKER_SUMMARY 并结束——编排者会根据 `review-summary.json` 的 `allPassed` 推导 result 并推进（D8）
 - **verify** 阶段：完成后输出 WORKER_SUMMARY 并结束——编排者会根据 `verify-summary.json` 的 `allPassed` 推导 result 并推进（D8）
 
-### 增量 / 分片模式
+### 增量回环（fix → review）
 
-当 `incrementalContext.targetPackages` 存在时（fix 增量回环 或 按包分片）：
-- **只处理指定包**，未涉及包的 per-package artifact 保持不变
-- **summary 不手写**：写完本批 review.json 后调 `generateReviewSummary`，由代码聚合所有 per-package review.json（含未涉及包的已有结果）生成 review-summary.json，确保 `allPassed` 反映全部包的真实状态
-- **增量回环时核对旧问题**（`incrementalContext.previousFindings` 存在）：先逐项核对 previousFindings 列出的上次 mustFix 是否已修复，再全包重审找新问题。未修复的旧问题必须再次列入本次 mustFix（不能因"上次报过"就略过）；已修复的不再列入。这保证 fix 没修好的问题不会被遗忘。
+review 是**项目级单次审核**（无分片）。当 `incrementalContext.targetPackages` 存在时（fix 增量回环）：
+- **先 `read` 现有 `${artifactsDir}/review.json`**，只重审 targetPackages 列出的包、替换其 `packages[]` 条目；**未涉及包的条目原样保留**（不得改动/删除），写回完整 `review.json`。`packages[]` 必须始终覆盖全部包（缺包会被 advance 拒绝）。
+- **summary 不手写**：review.json 更新后调 `generateReviewSummary`，由代码合并 review.json（语义）+ review-static.json（静态）生成 review-summary.json，确保 `allPassed` 反映全部包真实状态。
+- **核对旧问题**（`incrementalContext.previousFindings` 存在）：先逐项核对 previousFindings 列出的上次 mustFix 是否已修复，再审 targetPackages 找新问题。未修复的旧问题必须再次列入本次 mustFix（不能因"上次报过"就略过）；已修复的不再列入。这保证 fix 没修好的问题不会被遗忘。
 
 ## 20 类审查清单
+
+> **Step A 工具已扫项（确定性，勿重复查）**：#10/#11/#12/#15/#16/#17/#19/#20-completeness 已由引擎在 dispatch 前
+> 跑 checkstyle + pmd + grep 脚本扫过，结果在 `review-static.json`。你**不要**再用 LLM 逐过程重复查这些机械类项。
+> **例外回退**：若 `review-static.json.toolSkipped.checkstyle=true`，则 #11/#12 回退你按清单审；若 `toolSkipped.pmd=true`，
+> 则 #15 回退你按清单审（mvn 不可用时工具跳过，grep 脚本仍覆盖 #10/#16/#17/#19）。#13 OOP / #14 注释 / #18 测试正确性 /
+> #20 测试正确性 仍由你审（工具未覆盖语义）。
+> **你重点审的（Step B 语义）**：#1-#9 逻辑等价/空值/异常/事务/游标/参数/命名追溯——这些工具查不了，需对照 PL/SQL 源码。
 
 | # | 类别 | 审查要点 |
 |---|------|---------|
@@ -63,16 +70,16 @@ permission:
 | 7 | cursor-mapping | 游标映射：显式/隐式游标是否映射为正确的 Mapper 查询 + 迭代 |
 | 8 | parameter-direction | 参数方向：IN/OUT/IN OUT 参数是否通过正确方式传递 |
 | 9 | naming-consistency | 命名一致性：Java 方法名是否与 Oracle 子程序名有可追溯的映射关系 |
-| 10 | todo-remaining | TODO 残留：统计未解决的 `// TODO: [translate]` 数量 |
-| 11 | naming-convention | 命名规约：类名 UpperCamelCase、方法名 lowerCamelCase、常量全大写下划线、包名全小写、布尔属性无 is 前缀、ServiceImpl 后缀 |
-| 12 | code-format | 代码格式：4 空格缩进、单行不超过 120 字符、大括号风格、运算符空格、方法参数逗号后空格 |
+| 10 | todo-remaining | 【Step A 工具扫】TODO 残留：统计未解决的 `// TODO: [translate]` 数量 |
+| 11 | naming-convention | 【Step A 工具扫，toolSkipped.checkstyle 时回退】命名规约：类名 UpperCamelCase、方法名 lowerCamelCase、常量全大写下划线、包名全小写、布尔属性无 is 前缀、ServiceImpl 后缀 |
+| 12 | code-format | 【Step A 工具扫，toolSkipped.checkstyle 时回退】代码格式：4 空格缩进、单行不超过 120 字符、大括号风格、运算符空格、方法参数逗号后空格 |
 | 13 | oop-convention | OOP 规约：@Override 注解、POJO 包装类型、toString 方法、BigDecimal 精度、构造方法无业务逻辑 |
 | 14 | comment-convention | 注释规约：中文注释、Javadoc 格式、@author/@date、枚举注释、TODO 格式 |
-| 15 | collection-exception | 集合与异常：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch、自定义异常 |
-| 16 | version-compliance | **版本合规性**：代码、pom.xml、依赖必须完全符合注入的 Java 代码规约中"Java 版本与框架配置"段落。对照"禁止的 Java 9+ 语法和 API"逐项检查代码，对照"pom.xml 构建配置"检查构建配置，对照"依赖命名空间"检查命名空间和依赖版本。**违反此项标记为 critical** |
-| 17 | test-completeness | 测试完整性：测试方法是否有真实逻辑（无空方法体、无 `// TODO: [test]` 残留）、arrange→act→assert 结构完整、断言有意义 |
+| 15 | collection-exception | 【Step A 工具扫，toolSkipped.pmd 时回退】集合与异常：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch、自定义异常 |
+| 16 | version-compliance | 【Step A 工具扫 grep】**版本合规性**：代码、pom.xml、依赖必须完全符合注入的 Java 代码规约中"Java 版本与框架配置"段落。对照"禁止的 Java 9+ 语法和 API"逐项检查代码，对照"pom.xml 构建配置"检查构建配置，对照"依赖命名空间"检查命名空间和依赖版本。**违反此项标记为 critical** |
+| 17 | test-completeness | 【Step A 工具扫】测试完整性：测试方法是否有真实逻辑（无空方法体、无 `// TODO: [test]` 残留）、arrange→act→assert 结构完整、断言有意义 |
 | 18 | test-correctness | 测试正确性：Mock 设置与生产代码逻辑匹配、@InjectMocks 目标正确、测试覆盖 happy path 和异常路径 |
-| 19 | mapper-test-completeness | Mapper 集成测试完整性：每个 Mapper XML 的 `<select>/<insert>/<update>/<delete>` 是否都有对应集成测试方法、无空方法体（除 `@Disabled` 外）、无 `// TODO: [mapper-test]` 残留、arrange→act→assert 结构完整 |
+| 19 | mapper-test-completeness | 【Step A 工具扫】Mapper 集成测试完整性：每个 Mapper XML 的 `<select>/<insert>/<update>/<delete>` 是否都有对应集成测试方法、无空方法体（除 `@Disabled` 外）、无 `// TODO: [mapper-test]` 残留、arrange→act→assert 结构完整 |
 | 20 | mapper-test-correctness | Mapper 集成测试正确性：测试数据 INSERT 与 `schema-h2.sql` 表结构一致、`@MybatisTest` + `@AutoConfigureTestDatabase` 配置正确、H2 不兼容 SQL 已标 `@Disabled`、测试数据使用硬编码 ID 值（不使用 NEXTVAL） |
 
 ### 严重级别定义
@@ -105,41 +112,53 @@ permission:
 
 ### 输出
 
-- **per-package artifact**：`${artifactsDir}/translations/{package}/review.json`
-- **顶层 summary**：`${artifactsDir}/review-summary.json`
+- **项目级 review artifact**：`${artifactsDir}/review.json` — 一个文件，`packages[]` 覆盖 inventory **全部包**（每包一项：packageName/passed/overallScore/procedureReviews/mustFix/suggestions/todoRemainingCount）
+- **顶层 summary**：`${artifactsDir}/review-summary.json`（由 `generateReviewSummary` 代码聚合，不手写）
 
 ### 工作步骤
 
+#### Step 0: 读取 Step A 静态扫描结果
+
+读取 `${artifactsDir}/review-static.json`（引擎 dispatch 前已用 checkstyle + pmd + grep 脚本确定性扫好，零 LLM）。
+- 其中 `findings[]` 是机械类规约问题（#10/#11/#12/#15/#16/#17/#19/#20-completeness），**已归因到包**——这些静态问题你**不要**再用 LLM 重复查。
+- 记下 `toolSkipped.checkstyle` / `toolSkipped.pmd`：为 `true` 表示该工具不可用，对应清单项（#11/#12 或 #15）**回退你按清单审**。
+- 静态 finding 不进你写的 `review.json`（走独立通道进 fix）；你只在 `review.json` 记录 **语义** 审查结果（#1-#9 + #13/#14/#18/#20-correctness）。
+- 若 `review-static.json` 不存在（老 run / 扫描失败）：按完整 20 类清单审，不跳过。
+
 #### Step 1: 确定审查范围
 
-- **分片 / 增量模式**（Runtime Context `incrementalContext.targetPackages` 存在）：**只审查本分片/增量列出的包**，不要审查其它包，不要一次性读全部源码。每包审完立即写盘。
-- **全量模式**（无 targetPackages）：审查 `inventory.json.packageNames`（或 `analysis.json.packageNames`）中的所有包
+- **项目级单次审核（无 targetPackages）**：审查 `inventory.json.packageNames`（或 `analysis.json.packageNames`）中的**所有包**，产出**一个** `review.json`（`packages[]` 覆盖全部包）。
+- **fix 回环增量（`incrementalContext.targetPackages` 存在）**：**先 `read` 现有 `${artifactsDir}/review.json`**，只重审 targetPackages 列出的包、更新其 `packages[]` 条目；**其余包的条目原样保留**（不得改动/删除），写回完整 `review.json`。complete 校验要求 packages[] 仍覆盖全部包。
 
 #### Step 2: 逐包审查
 
 对每个待审查的包：
 
 1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
-2. **逐子程序审查**：对每个子程序，按 20 类审查清单逐项检查。Java 文件路径基于 `projectRoot`（如 `{projectRoot}/src/main/java/...`）
-3. **审查 ServiceImpl 测试代码**：读取测试类 Java 文件（`{projectRoot}/src/test/java/` 下对应的 `{ServiceImplClass}Test.java`）
-   - 按 test-completeness（#17）检查：无空方法体、无 `// TODO: [test]` 残留、arrange→act→assert 结构完整
+2. **聚焦语义审查（按 Step B 聚焦清单）**：workOrder 里若注入了 `## Step B 聚焦语义审查清单`，**只审清单列出的过程/点**——这些是有信号（高风险/游标/异常/出参/NVL/AUTONOMOUS）的过程。按清单给每个聚焦点的 PL/SQL `sed -n` 源码段 + Java 方法锚点，对照审其触发的语义类别（#1-#9）+ 工具未覆盖的 #13 OOP / #14 注释。
+   - **无信号的过程跳过语义审**（清单末尾会注明跳过数）——它们靠 Step A 静态扫描兜底，不要逐个全审，省 LLM。
+   - 若 workOrder **未注入**聚焦清单（老 run / 无信号 / 无聚焦点）：回退全量逐子程序语义审 #1-#9 + #13/#14。
+   - **机械类（#10/#11/#12/#15/#16/#17/#19）已由 Step A 工具扫过（见 review-static.json），勿重复查**（toolSkipped 对应项除外，回退手审）。Java 文件路径基于 `projectRoot`（如 `{projectRoot}/src/main/java/...`）
+3. **审查 ServiceImpl 测试代码**（聚焦清单「测试审查」段列出的测试类）：读取测试类 Java 文件
    - 按 test-correctness（#18）检查：Mock 设置与 ServiceImpl 依赖一致、断言覆盖关键逻辑
+   - test-completeness（#17）已由 Step A 工具扫（空方法体/TODO残留），勿重复
    - 空 TODO 测试方法标记为 mustFix（severity: major）
-4. **审查 Mapper 集成测试代码**：读取 Mapper 集成测试文件（`{projectRoot}/src/test/java/` 下对应的 `{MapperName}IntegrationTest.java`）
-   - 按 mapper-test-completeness（#19）检查：每个 Mapper XML statement 都有对应测试方法、无空方法体（`@Disabled` 除外）、无 `// TODO: [mapper-test]` 残留、arrange→act→assert 结构完整
+4. **审查 Mapper 集成测试代码**（聚焦清单「测试审查」段列出的 Mapper 测试类）：读取 Mapper 集成测试文件
    - 按 mapper-test-correctness（#20）检查：测试数据 INSERT 与 `schema-h2.sql` 表结构一致、`@MybatisTest` + `@AutoConfigureTestDatabase` 配置正确、H2 不兼容 SQL 已标 `@Disabled`、测试数据使用硬编码 ID
-   - 空 TODO 测试方法标记为 mustFix（severity: major）
+   - mapper-test-completeness（#19）已由 Step A 工具扫，勿重复
    - 缺少 Mapper XML statement 对应测试方法标记为 mustFix（severity: minor）
-5. **产出 per-package review.json**：每审完一个包立即写入，包含：
+5. **产出项目级 review.json**：把所有包的审查结果写入**一个** `${artifactsDir}/review.json`，结构为 `{ "packages": [ <每包一项> ] }`，`packages[]` **必须覆盖 inventory 全部包**（缺包会被 advance 拒绝）。每个包条目字段：
    - `packageName`：Oracle 包名
-   - `passed`：是否通过
-   - `overallScore`：0-100 分
-   - `procedureReviews`：逐子程序的检查项
-   - `mustFix`：必须修复的问题（passed=false 时必须非空）
+   - `passed`：是否通过（**纯语义**：仅反映 #1-#9 + #13/#14/#18/#20-correctness；静态 finding 不进此处）
+   - `overallScore`：0-100 分（语义质量分）
+   - `procedureReviews`：聚焦点对应的检查项（无信号过程可不入）
+   - `mustFix`：语义必须修复的问题（passed=false 时必须非空）
    - `suggestions`：改进建议
-   - `todoRemainingCount`：该包的 TODO 残留数
+   - `todoRemainingCount`：该包的 TODO 残留数（可从 review-static.json 该包 todo-remaining 计数转抄）
 
-   完整示例：
+   fix 回环（targetPackages 存在）：先 `read` 现有 review.json，**只替换 targetPackages 包的条目**，其余包条目原样保留，写回完整文件。
+
+   每个包条目示例：
 
    ```json
    {
@@ -175,18 +194,18 @@ permission:
 
 #### Step 3: 调用 generateReviewSummary 聚合 review-summary.json
 
-review 按包分片，每个分片只写本分片包的 `translations/{pkg}/review.json`。**summary 不要手写**——本分片 review.json 写完后，调用代码 action 聚合所有 per-package review.json：
+review 是项目级单次审核，写**一个** `${artifactsDir}/review.json`（`packages[]` 覆盖全部包）。**summary 不要手写**——review.json 写完后，调用代码 action 合并 review.json（语义）+ review-static.json（静态）聚合成 review-summary.json：
 
 ```
 workflow({ action: "generateReviewSummary", runId: "<runId>" })
 ```
 
-该 action 读取所有 `translations/*/review.json`，确定性聚合成顶层 `review-summary.json`：
-- `allPassed` = 所有包 `passed` 取与
-- `packageResults`：每包 `{ packageName, passed, score(=overallScore), mustFixCount }`
-- `totalMustFix` / `totalTodosRemaining`：求和
+该 action 读取 `${artifactsDir}/review.json` 的 `packages[]`（语义）+ `review-static.json`（静态），确定性聚合成顶层 `review-summary.json`：
+- `allPassed` = 所有包 `passed && staticPassed` 取与
+- `packageResults`：每包 `{ packageName, passed, staticPassed, score(=overallScore), mustFixCount }`
+- `totalMustFix`（语义求和）/ `totalStaticFindings`（静态数）/ `totalTodosRemaining`
 
-幂等：每个分片都可调用（聚合当下已存在的全部 review.json）；最终分片产出的 summary 覆盖全部包。若 action 报错（如未找到任何 review.json），先确认本分片 review.json 已正确写入再重试。
+幂等：可重复调用。若 action 报错（如 review.json 缺失/包未覆盖），先确认 `review.json` 的 `packages[]` 覆盖 inventory 全部包再重试。
 
 #### Step 4: 输出摘要
 
@@ -194,21 +213,19 @@ workflow({ action: "generateReviewSummary", runId: "<runId>" })
 
 ### 质量检查
 
-- [ ] 本分片每个包的 review.json 已写入
+- [ ] 已读取 `review-static.json`（Step 0）：机械类问题已知悉，未用 LLM 重复查
+- [ ] `toolSkipped` 为 true 的项已回退手审（#11/#12 或 #15）
+- [ ] 已写**一个** `${artifactsDir}/review.json`，`packages[]` 覆盖 inventory 全部包（fix 回环时保留了非目标包条目）
+- [ ] review.json 每包条目纯语义（passed/mustFix/score 反映 #1-#9 + #13/#14/#18/#20-correctness，静态 finding 不进 review.json）
 - [ ] passed=true 时 mustFix 为空，passed=false 时 mustFix 非空
 - [ ] 每个 mustFix 项都有 file、line、issue
 - [ ] severity 只使用 critical/major/minor/info 四种值
-- [ ] 已调用 generateReviewSummary 生成 review-summary.json（不要手写 summary）
-- [ ] 命名规约（naming-convention）已逐类逐方法审查
-- [ ] 代码格式（code-format）已审查
+- [ ] 已调用 generateReviewSummary 生成 review-summary.json（不要手写 summary；静态 finding 由代码合并进 staticPassed）
+- [ ] 语义类 #1-#9 已逐子程序对照 PL/SQL 源码审查
 - [ ] OOP 规约（oop-convention）已审查
 - [ ] 注释语言为中文（comment-convention）已审查，英文注释标记为 major
-- [ ] 集合与异常（collection-exception）已审查：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch
-- [ ] 版本合规性（version-compliance）已审查：代码 API、pom.xml 配置、依赖命名空间均符合注入的 Java 代码规约中的"Java 版本与框架配置"
-- [ ] 测试代码已按 test-completeness（#17）和 test-correctness（#18）审查
-- [ ] 空 TODO 测试方法已标记为 mustFix（major severity）
-- [ ] Mapper 集成测试已按 mapper-test-completeness（#19）和 mapper-test-correctness（#20）审查
-- [ ] 空 TODO Mapper 测试方法已标记为 mustFix（major severity）
+- [ ] 版本合规性（version-compliance）：`review-static.json` 已 grep 扫 Java 9+ API（critical），你只需复核 pom.xml/依赖命名空间
+- [ ] 测试正确性 test-correctness（#18）和 mapper-test-correctness（#20）已审查（completeness #17/#19 已由 Step A 工具扫）
 
 ---
 

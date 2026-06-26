@@ -73,11 +73,10 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "review",
-      description: "翻译质量审查（按包分片，每分片 1 包；summary 由 generateReviewSummary 代码聚合）",
+      description: "静态审核(项目级单次)：Step A 工具确定性扫描(checkstyle+pmd+grep, 全项目一次, 零 LLM) + Step B LLM 聚焦语义审查；reviewer 写一个项目级 review.json(packages[]覆盖全部包)，summary 由 generateReviewSummary 合并静态+语义",
       agentFile: "agent/reviewer.md",
       temperature: 0.1,
       maxRetries: 1,
-      maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "workflow"],
     },
     {
@@ -148,13 +147,17 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   dedup: [..._PLAN, ..._SCAFFOLD, ..._INV_BASE, ..._ANALYSIS, ..._TRANSLATIONS, "dedup-duplicates.json"],
   // TODO (F9): translations/*/translation.json 在 dedup/review/verify 三阶段重复读取，
   // artifactCache 每次 advance 清空导致无法跨阶段缓存。考虑支持只读 artifact 的跨阶段缓存。
-  review: [..._PLAN, ..._SCAFFOLD, ..._ANALYSIS, ..._DEDUP, ..._TRANSLATIONS],
+  // review-static.json：dispatch 前 engine 写入的项目级静态扫描产物；顶层文件不被 narrowUpstreamForShard 收窄。
+  review: [..._PLAN, ..._SCAFFOLD, ..._ANALYSIS, ..._DEDUP, ..._TRANSLATIONS, "review-static.json"],
   verify: [..._PLAN, ..._SCAFFOLD, ..._DEDUP, ..._TRANSLATIONS],
   fix: [
     ..._ANALYSIS, ..._PLAN, ..._SCAFFOLD, ..._DEDUP,
     // 动态路径：取决于触发阶段（review 或 verify），plugin 注入时需根据 branchedFrom 拼接
     "review-summary.json", "verify-summary.json",
-    ..._TRANSLATIONS, "translations/*/review.json", "translations/*/verify.json",
+    // review 改项目级单文件：fix 读 review.json(语义 mustFix) + review-static.json(静态 finding)
+    "review.json",
+    "review-static.json",
+    ..._TRANSLATIONS, "translations/*/verify.json",
   ],
 }
 

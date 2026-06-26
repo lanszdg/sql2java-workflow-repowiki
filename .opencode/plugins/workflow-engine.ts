@@ -12,7 +12,7 @@
  */
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, realpathSync } from "node:fs"
 import { join, dirname, resolve, sep, relative, isAbsolute, basename } from "node:path"
-import { safeWriteFile } from "../workflow/cross-platform"
+import { safeWriteFile, extractLineRange } from "../workflow/cross-platform"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { enhanceRejection } from "../workflow/rejection-guidance"
 import { renderSchemaHint } from "../workflow/schema-hint-renderer"
@@ -25,11 +25,15 @@ import {
 } from "../workflow/artifact-schemas"
 import { scanSource } from "../workflow/plsql-scanner"
 import { refNamesForPackage, pkgOf, refOf } from "../workflow/refname"
+import { parseInventoryPackage, parseAnalysisPackage, type InventoryPackageParsed } from "../workflow/package-parser"
 import { buildInventoryFromIndex } from "../workflow/inventory-builder"
 import { buildAnalysisFromIndex } from "../workflow/analysis-builder"
+import { renderWorkerPrompt, persistWorkOrder, readPersistedWorkOrder, getSubtaskTriggerPrompt } from "../workflow/prompt-renderer"
 import { buildReviewSummary } from "../workflow/review-summary-builder"
 import { buildVerifySummary } from "../workflow/verify-summary-builder"
 import { scanDuplicates } from "../workflow/dedup-scanner"
+import { scanReviewStatic } from "../workflow/review-scanner"
+import { buildReviewFocus } from "../workflow/review-focus"
 import { ensureDeps, findOpencodeDir } from "../workflow/ensure-deps"
 import {
   PhaseMetricsCollector,
@@ -190,6 +194,31 @@ function setWorkflowContext(run: WorkflowRun): void {
   activeCollector = new PhaseMetricsCollector(
     run.currentPhase ?? "unknown", run.runId, artifactsDir, fixIndex,
   )
+}
+
+/**
+ * 按需解析本分片 per-unit 写入边界的 allowed ref 集合（root + cargo FUNCTION，大写）。
+ *
+ * 不在 setWorkflowContext 里缓存——setWorkflowContext 在首分片 dispatch 时早于分片计划设置
+ * targetUnits 调用，缓存会取到空值导致边界失效。worker 实际写入时 targetUnits 必已就绪
+ * （分片计划在 spawn worker 前设置），故写入时按需解析最稳健。返回 undefined = 不启用边界
+ * （包级阶段 / targetUnits 空 / 非启用阶段）。
+ */
+function resolveUnitAllowedRefs(): Set<string> | undefined {
+  const ctx = currentWorkflowContext
+  if (!ctx) return undefined
+  if (!UNIT_WRITE_BOUNDARY_PHASES.has(ctx.phase)) return undefined
+  const run = engine.status(ctx.runId)
+  const currentEntry = run ? engine.findCurrentEntry(run) : undefined
+  const targetUnits = currentEntry?.incrementalContext?.targetUnits as string[] | undefined
+  if (!targetUnits || targetUnits.length === 0) return undefined
+  const analysis = engine.loadArtifactJson(join(ARTIFACT_DIR, ctx.runId), "analysis")
+  const ownership = (analysis?.functionOwnership as Record<string, string> | undefined) ?? {}
+  const refs = new Set<string>(targetUnits.map(u => refOf(u).toUpperCase()))
+  for (const [func, owner] of Object.entries(ownership)) {
+    if (targetUnits.includes(owner)) refs.add(refOf(func).toUpperCase())
+  }
+  return refs
 }
 
 /** 统一的 fixIndex 递增逻辑：优先读内存 Map，回退到磁盘文件计数 */
@@ -705,6 +734,172 @@ function buildRuntimeContext(run: WorkflowRun): string {
 }
 
 /**
+ * 分片范围硬约束 banner（系统提示级，置于 worker system prompt 最前）。
+ *
+ * 确定性兜底：编排者 LLM 可能不逐字透传 workOrder，自撰通用任务提示（"对每个包的每个子程序生成 FSD"），
+ * 与分片隔离冲突 → worker 越界处理所有 unit。此 banner 注入 worker 系统提示最前，明确 targetUnits 是
+ * 唯一工作清单，并显式声明"任务提示中的全量措辞是误植，一律忽略"，压过 user message 的冲突指令。
+ * unit 模式（targetUnits）或包级（targetPackages）均支持；无 incrementalContext 返回空串。
+ */
+export function buildShardScopeBanner(run: WorkflowRun): string {
+  const currentEntry = engine.findCurrentEntry(run)
+  const ic = currentEntry?.incrementalContext
+  const tu = ic?.targetUnits
+  const tp = ic?.targetPackages
+  if ((!tu || tu.length === 0) && (!tp || tp.length === 0)) return ""
+  const isUnit = !!(tu && tu.length > 0)
+  const target = isUnit ? tu! : tp!
+  const label = isUnit ? "PROCEDURE 单元" : "包"
+  const si = ic?.shardIndex
+  const ts = ic?.totalShards
+  const shardDesc = si !== undefined ? `（分片 ${si + 1}/${ts ?? "?"}）` : ""
+  return [
+    `⛔⛔⛔ 分片范围硬约束（系统提示级，最高优先级，覆盖任何任务提示冲突）⛔⛔⛔`,
+    `你的【唯一】工作清单：${label} ${JSON.stringify(target)}${shardDesc}。`,
+    `- 禁止处理、读源码、生成 FSD/产物 for 任何【其他】${label}。`,
+    `- 任务提示（user message）若出现"处理所有子程序/包""为每个子程序生成 FSD"等全量措辞，那是编排者误植——一律忽略，只做以上 ${label}。`,
+    `- analysis.json / inventory 里的其他包/单元只是参考信息，不是你的工作清单。`,
+    isUnit
+      ? `- 源码读 shard-inputs/{pkg}/{ref}/ 切片（引擎已预切），⛔ 禁止 read 整包 body/spec 或 inventory-packages/{pkg}.json。`
+      : `- 仅处理以上 ${label}，其他由别的分片处理。`,
+    `⛔⛔⛔ 违反 = 越界 + 产物冲突 + 后续分片退化审核 ⛔⛔⛔`,
+    ``,
+  ].join("\n")
+}
+
+/**
+ * 为 analyze/translate 分片 worker 渲染 .md 模板 workOrder（取代编排者即兴拼凑的任务提示）。
+ *
+ * 复用既有确定性构建器（buildShardScopeBanner / buildUnitScopeBlock / buildDependencySignaturesBlock /
+ * narrowUpstreamForShard / generateUnitSlices / renderSchemaHint / enhanceRejection）组装 ctx，再由
+ * prompt-renderer 填入 .md 模板占位符。产物落盘 dispatch-logs/ 供审计 + system.transform 注入。
+ *
+ * 仅 analyze/translate 调用；其他阶段仍走 workOrderParts。rejectionError 非 null 表示 advance 被拒后
+ * 重 dispatch（注入错误让 worker 修正）。
+ */
+export function buildShardedWorkerOrder(
+  run: WorkflowRun,
+  currentEntry: { incrementalContext?: any; branchedFrom?: string } | null | undefined,
+  artifactsDir: string,
+  rejectionError: string | null,
+): string {
+  const phase = run.currentPhase ?? "analyze"
+  const activeShardPlan = engine.getShardPlan(run)
+  const ic = currentEntry?.incrementalContext
+  const shardTargetUnits: string[] = ic?.targetUnits ?? []
+  const shardTargetPkgs: string[] = ic?.targetPackages ?? []
+  const isUnitMode = shardTargetUnits.length > 0
+  const si = ic?.shardIndex as number | undefined
+  const ts = (ic?.totalShards as number | undefined) ?? activeShardPlan?.shards.length
+  const completedUnitIds = (activeShardPlan?.completedShards ?? []).flatMap((i: number) => activeShardPlan!.shards[i] ?? [])
+  const sourcePath = String((run.metadata as Record<string, unknown>).sourcePath ?? "")
+  // 用传入的 artifactsDir（真实 dispatch = `${ARTIFACT_DIR}/${run.runId}`；测试可传 tmpdir）
+  const artDir = artifactsDir
+
+  // 1) 预切 per-unit 切片（unit 模式）——必须在 narrowUpstreamForShard 之前落盘
+  if (isUnitMode) {
+    try {
+      generateUnitSlices(artDir, shardTargetUnits, phase, sourcePath)
+    } catch (e: any) {
+      getLogger().warn("[dispatch]", `generateUnitSlices 失败（回退整包 upstream）: ${e.message}`)
+    }
+  }
+
+  // 2) upstream 收窄
+  let upstream = UPSTREAM_ARTIFACTS[phase] ? [...UPSTREAM_ARTIFACTS[phase]] : []
+  if (upstream.length > 0 && activeShardPlan && si !== undefined) {
+    let functionOwnership: Record<string, string> | undefined
+    if (isUnitMode) {
+      const analysis = engine.loadArtifactJson(artDir, "analysis")
+      functionOwnership = (analysis?.functionOwnership as Record<string, string> | undefined) ?? undefined
+    }
+    upstream = narrowUpstreamForShard(upstream, phase, shardTargetPkgs, completedUnitIds, {
+      targetUnits: shardTargetUnits,
+      functionOwnership,
+    })
+  }
+
+  // 3) 动态块
+  const scopeBanner = buildShardScopeBanner(run)
+  const scopeBlock = isUnitMode
+    ? buildUnitScopeBlock(artDir, shardTargetUnits, phase, completedUnitIds, sourcePath)
+    : ""
+  const depSignaturesBlock = (phase === "translate" && isUnitMode)
+    ? buildDependencySignaturesBlock(artDir, shardTargetUnits, completedUnitIds)
+    : ""
+
+  // 4) projectRoot（translate 在 plan 之后，有；analyze 在 plan 之前，无）
+  const planArt = engine.loadArtifactJson(artDir, "plan")
+  const artifactId = (planArt?.targetProject as any)?.artifactId
+  const projectRoot = artifactId ? join(resolveProjectRoot(), "generated", artifactId) : null
+  const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
+  const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
+  const mainEntryLine = mainEntry ? `- mainEntry: \`${mainEntry}\`` : ""
+
+  // 5) upstream 列表
+  const upstreamArtifactsList = upstream.length > 0
+    ? upstream.map(a => `- \`${artifactsDir}/${a}\``).join("\n")
+    : "（无）"
+
+  // 6) 分片信息块
+  const targetWord = isUnitMode ? "PROCEDURE 单元" : "包"
+  const targetList = (isUnitMode ? shardTargetUnits : shardTargetPkgs).join(", ")
+  const shardInfoBlock = (si !== undefined && ts !== undefined)
+    ? [
+        `## 分片信息`,
+        `- 本分片序号: ${si + 1} / ${ts}`,
+        `- 本分片${targetWord}列表: ${targetList}`,
+        `- **只处理以上列出的${targetWord}，不要处理其他${targetWord}**`,
+        `- 已完成分片: ${(activeShardPlan?.completedShards ?? []).map((i: number) => i + 1).join(", ") || "无"}`,
+      ].join("\n")
+    : ""
+
+  // 7) schemaHint
+  const schemaHint = renderSchemaHint(phase) ?? ""
+
+  // 8) rejectionError 块（advance 被拒后重 dispatch）
+  let rejectionErrorBlock = ""
+  if (rejectionError) {
+    const isStructural = !rejectionError.includes("质量门控") && !rejectionError.includes("校验失败（阻塞级）")
+    const enhancedError = enhanceRejection(phase, rejectionError, isStructural)
+    rejectionErrorBlock = [
+      isStructural ? `## ⚠️ 上次 advance 被拒绝——结构格式问题，只需修正 JSON` : `## ⚠️ 上次 advance 被拒绝——必须先修正以下问题`,
+      enhancedError,
+      isStructural
+        ? `**这是结构格式问题。只需修正上方列出的具体 JSON 字段，不需要重新执行阶段工作。**`
+        : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY。**`,
+      `**不要只改格式凑校验——必须确保内容完整且正确。**`,
+    ].join("\n")
+  }
+
+  // 9) shardLabelSuffix
+  const shardLabelSuffix = (si !== undefined && ts !== undefined) ? `（分片 ${si + 1}/${ts}）` : ""
+
+  const ctx = {
+    shardLabelSuffix,
+    scopeBanner,
+    runId: run.runId,
+    sourcePath: sourcePath || "unknown",
+    artifactsDir,
+    mainEntryLine,
+    projectRootLine,
+    upstreamArtifactsList,
+    shardInfoBlock,
+    scopeBlock,
+    depSignaturesBlock,
+    schemaHint,
+    rejectionErrorBlock,
+  }
+  const rendered = renderWorkerPrompt(phase, ctx)
+  try {
+    persistWorkOrder(artifactsDir, phase, si, rendered)
+  } catch (e: any) {
+    getLogger().warn("[dispatch]", `persistWorkOrder 失败（不阻断）: ${e.message}`)
+  }
+  return rendered
+}
+
+/**
  * 构建共享指令文本块（Runtime Context 表格 + Artifact 写入规则 + 阶段小结）
  * 所有 agent 共享，由引擎自动注入，agent .md 文件不再包含这些重复内容
  */
@@ -1149,7 +1344,7 @@ export function mergeUnitAnalysis(artifactsDir: string, pkgName: string): string
  * D5: advance 时从磁盘读取 artifact 并做 Zod 校验
  * 返回 null 表示校验通过，否则返回错误信息
  */
-function validateArtifactOnDisk(run: WorkflowRun): string | null {
+export function validateArtifactOnDisk(run: WorkflowRun): string | null {
   const phase = run.currentPhase
   if (!phase) return null
 
@@ -1318,11 +1513,20 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       if (phase === "inventory") {
         const pkgError = validateInventoryPackages(artifactsDir)
         if (pkgError) return pkgError
-        // analysis.json 现由 inventory 阶段 generateAnalysis 代码产出，此处复验
+        // analysis.json 由 inventory 阶段 generateAnalysis 代码产出（零 LLM 确定性）。worker 偶发漏调
+        // generateAnalysis 或调用抛错 → 文件缺失 → advance 卡住。引擎在此兜底自动生成（与 dedup.json /
+        // review-static.json 引擎兜底同模式），消除对该 worker action 的强依赖。生成失败才报错（且错误
+        // 信息比"Artifact not found"更具诊断价值——直接暴露 buildAnalysisFromIndex 的失败原因）。
         const analysisPath = join(artifactsDir, "analysis.json")
         if (!existsSync(analysisPath)) {
-          return `Artifact not found on disk: ${analysisPath}. inventory 阶段必须调用 generateAnalysis 产出 analysis.json。`
+          try {
+            buildAnalysisFromIndex(artifactsDir)
+            getLogger().warn("[advance]", "inventory worker 未产出 analysis.json，引擎兜底生成成功")
+          } catch (e: any) {
+            return `analysis.json 缺失且引擎兜底生成失败: ${e.message}（检查 inventory-index.json 是否完整；可重试 workflow({action:"generateAnalysis", runId:"${run.runId}"})）`
+          }
         }
+        // 复验（含兜底生成的）：Zod 校验
         try {
           const aRaw = readFileSync(analysisPath, "utf-8")
           const aParsed = JSON.parse(aRaw)
@@ -1400,6 +1604,25 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
               }
             }
           } catch { /* dedup-duplicates.json 读失败不阻断（scanner 已校验过 schema） */ }
+        }
+      }
+
+      // review 阶段（项目级单文件）：review.json.packages 必须覆盖 inventory 全部包。
+      // 无论主线还是 fix 回环都校验——fix 回环时 reviewer 必须保留非 fixed 包的条目（防 read-modify-write 丢条目）。
+      if (phase === "review") {
+        const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+        if (inventory) {
+          const expected = engine.extractPackageNames(inventory)
+          const present = new Set(
+            ((parsed.packages as Array<{ packageName?: unknown }>) ?? [])
+              .map(p => p?.packageName)
+              .filter((n): n is string => typeof n === "string" && n.length > 0)
+              .map(n => n.toUpperCase())
+          )
+          const missing = [...expected].filter(p => !present.has(p.toUpperCase()))
+          if (missing.length > 0) {
+            return `review.json packages[] 缺失包: ${missing.join(", ")}。review 是项目级单次审核，packages[] 必须覆盖 inventory 全部包（fix 回环时须保留非目标包的现有条目，只更新目标包）。`
+          }
         }
       }
     } catch (e: any) {
@@ -1921,6 +2144,40 @@ function resolveSourcePath(runId: string): string {
 }
 
 /**
+ * 启用 per-unit 写入边界的阶段。analyze（Phase 1）+ translate（Phase 2）。
+ * 单元模式下 worker 可能读了整包后顺手写出别的 unit 产物 → 后续分片退化审核；此边界按 targetUnits
+ * 拦截 per-unit artifact 越界写入。review/fix 走 targetPackages（targetUnits 空）不触发。
+ */
+const UNIT_WRITE_BOUNDARY_PHASES = new Set(["analyze", "translate"])
+
+/**
+ * per-unit artifact 写入越界判定。匹配两级子目录的 per-unit 路径：
+ *   translations/{pkg}/{ref}.json | analysis-packages/{pkg}/{ref}.json | fsd/{pkg}/{ref}.md
+ * 聚合文件（translations/{pkg}/translation.json 等只一级目录）不匹配 → 放行。
+ *
+ * @param relPath 相对 artifactsDir 的路径（或 normalized 后的 artifacts 子路径）
+ * @param allowedRefs 本分片允许的 ref 集合（targetUnits 的 root ref + cargo FUNCTION ref，大写）。
+ *                    undefined/空 → 不启用边界（包级阶段）。
+ * @returns 越界原因字符串；null = 放行
+ */
+export function unitWriteBoundaryViolation(
+  relPath: string,
+  allowedRefs: Set<string> | undefined,
+): string | null {
+  if (!allowedRefs || allowedRefs.size === 0) return null
+  const normalized = relPath.replace(/\\/g, '/')
+  const m = normalized.match(/(?:translations|analysis-packages|fsd)\/[^/]+\/([^/]+)\.(?:json|md)$/)
+  if (!m) return null
+  const ref = m[1]
+  // 聚合文件名保险（理论上两级路径下不会出现，显式放行避免误伤）
+  if (ref === "translation" || ref === "review" || ref === "verify") return null
+  if (!allowedRefs.has(ref.toUpperCase())) {
+    return `per-unit 越界写入：${ref} 不在本分片 targetUnits（含 cargo），已拦截`
+  }
+  return null
+}
+
+/**
  * 统一路径分类：判断写入路径应归属哪个 zone，以及是否需要重定向或阻止。
  *
  * 所有路径须先通过 resolve() 转为绝对路径。
@@ -1935,12 +2192,16 @@ function resolveSourcePath(runId: string): string {
  * | source    | 🚫 block        | 🚫 block       |
  * | sensitive | 🚫 block        | 🚫 block       |
  * | outside   | → redirect projectRoot | → redirect artifactsDir |
+ *
+ * opts.unitAllowedRefs：unit 模式下本分片允许的 per-unit ref 集合（大写）。artifacts zone 内
+ * per-unit 路径越界 → block（防止 worker 顺手写别的 unit 产物）。
  */
 function classifyWritePath(
   filePath: string,
   artifactsDir: string,
   projectRoot: string,
   sourcePath: string,
+  opts?: { unitAllowedRefs?: Set<string> },
 ): PathClassification {
   const fileType = classifyFileType(filePath)
   const normalized = filePath.replace(/\\/g, '/')
@@ -1999,6 +2260,12 @@ function classifyWritePath(
         correctedPath: normProject + '/' + cleanedRel,
         shouldBlock: false,
       }
+    }
+    // per-unit 越界写入拦截（unit 模式）：本分片只允许写 targetUnits（含 cargo）的 per-unit 产物
+    const relPath = normalized.substring(normArtifacts.length + 1)
+    const violation = unitWriteBoundaryViolation(relPath, opts?.unitAllowedRefs)
+    if (violation) {
+      return { zone, fileType, shouldRedirect: false, correctedPath: null, shouldBlock: true, blockReason: violation }
     }
     return { zone, fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
   }
@@ -2100,11 +2367,25 @@ export function narrowUpstreamForShard(
   // 仅 inventory-packages 收窄生效，其余 no-op。
   if ((phase === "translate" || phase === "analyze") && targetUnits.length > 0) {
     const ownership = opts?.functionOwnership ?? {}
-    const unitPkgs = [...new Set(targetUnits.map(pkgOf))]
-    // 已完成 unit（completedPkgs 在 unit 模式下是 unit id）→ 包，供读聚合 translation.json
-    const completedUnitPkgs = [...new Set(completedPkgs.map(pkgOf))]
 
-    // 本分片 FSD：每个 unit 的根 FSD + 其 cargo FUNCTION 的 FSD
+    // ── analyze：切片硬隔离 ──
+    // 整包 inventory-packages/{pkg}.json（含同包全部 proc）→ per-unit 切片（source.sql +
+    // inventory-slice.json + meta.json，由 generateUnitSlices 在 dispatch 时落盘）。worker 物理上
+    // 拿不到同包其他 proc。analyze upstream = [inventory.json, inventory-packages/*.json, analysis.json]，
+    // 故仅 inventory-packages/*.json 被替换，inventory.json/analysis.json 原样保留（表 DDL + callGraph meta）。
+    if (phase === "analyze") {
+      const sliceFiles = targetUnits.flatMap(u => unitSliceRelPaths(u, "analyze"))
+      return upstream.flatMap(a => {
+        if (a === "inventory-packages/*.json") return sliceFiles
+        return [a]
+      })
+    }
+
+    // ── translate：切片硬隔离（Phase 2） ──
+    // 整包 inventory-packages/analysis-packages → per-unit 切片（source.sql + analysis-slice.json + meta.json）。
+    // translations/*/translation.json 清空——跨包/同包跨单元调用签名由 buildDependencySignaturesBlock
+    // 预注入到 workOrder，worker 不再读 translation.json（消除"读聚合 translation 顺手全做"）。
+    // FSD 已是 per-unit，保留根 + cargo 收窄。
     const fsdFiles: string[] = []
     for (const u of targetUnits) {
       fsdFiles.push(`fsd/${pkgOf(u)}/${refOf(u)}.md`)
@@ -2112,16 +2393,16 @@ export function narrowUpstreamForShard(
         if (owner === u) fsdFiles.push(`fsd/${pkgOf(func)}/${refOf(func)}.md`)
       }
     }
-
-    return upstream.flatMap(a => {
-      if (a === "inventory-packages/*.json") return unitPkgs.map(p => `inventory-packages/${p}.json`)
-      if (a === "analysis-packages/*.json") return unitPkgs.map(p => `analysis-packages/${p}.json`)
+    const sliceFiles = targetUnits.flatMap(u => unitSliceRelPaths(u, "translate"))
+    const translated = upstream.flatMap(a => {
+      // 两个整包结构 glob 都由 per-unit 切片取代（切片含 analysis-slice.json + source.sql + meta.json）
+      if (a === "inventory-packages/*.json") return sliceFiles
+      if (a === "analysis-packages/*.json") return sliceFiles
       if (a === "fsd/*/*.md") return fsdFiles
-      if (a === "translations/*/translation.json") {
-        return completedUnitPkgs.map(p => `translations/${p}/translation.json`)
-      }
+      if (a === "translations/*/translation.json") return []   // 依赖签名预注入，不再注入
       return [a]
     })
+    return [...new Set(translated)]
   }
 
   // 1) translations/* glob 收窄
@@ -2171,6 +2452,259 @@ export function narrowUpstreamForShard(
 }
 
 /**
+ * 本分片某 unit 的切片相对路径（artifactsDir 相对）。narrowUpstreamForShard 用——只算路径字符串，
+ * 不读不写（实际落盘由 generateUnitSlices 在 dispatch 时完成）。phase 决定注入哪些切片：
+ *  - analyze: source.sql + inventory-slice.json + meta.json（结构来自 inventory-packages）
+ *  - translate: source.sql + analysis-slice.json + meta.json（结构来自 analysis-packages 聚合）
+ */
+export function unitSliceRelPaths(unitId: string, phase: string): string[] {
+  const pkg = pkgOf(unitId)
+  const ref = refOf(unitId)
+  const base = `shard-inputs/${pkg}/${ref}`
+  const files = [`${base}/source.sql`, `${base}/meta.json`]
+  if (phase === "analyze") files.push(`${base}/inventory-slice.json`)
+  if (phase === "translate") files.push(`${base}/analysis-slice.json`)
+  return files
+}
+
+/**
+ * 引擎预切 per-unit 切片文件（硬输入边界）。dispatch 前调用，对本分片每个 targetUnit 落盘：
+ *   shard-inputs/{pkg}/{ref}/
+ *     source.sql            根 + cargo FUNCTION 源码片段（按 lineRange 抽取，注释分隔）
+ *     inventory-slice.json  analyze 用：根+cargo 的 inventory proc 条目（name/type/params/lineRange/bodyFile）
+ *     analysis-slice.json   translate 用：根+cargo 的 subprogram 结构（从 analysis-packages/{pkg}.json 过滤）
+ *     meta.json             { unitId, pkg, ref, cargoFuncs, sourceFiles, analysisMissing? }
+ *
+ * 目的：worker 物理上只拿到本 unit 的源码/结构，看不到同包其他 proc（消除"读整包顺手全做"）。
+ * 复用 buildUnitScopeBlock 已验证的 refMapForPkg / ownership 展开逻辑。确定性：每次 dispatch 总是
+ * 重新生成（sed 级开销，避免 resume 过期）。容错：源码/聚合缺失写空片段 + meta 标记，不阻断 dispatch。
+ *
+ * 返回所有生成的切片相对路径（供测试断言；dispatch 不强依赖返回值，路径由 narrowUpstreamForShard 算）。
+ */
+export function generateUnitSlices(
+  artifactsDir: string,
+  targetUnits: readonly string[],
+  phase: string,
+  sourcePath: string,
+): string[] {
+  if (targetUnits.length === 0) return []
+  if (phase !== "analyze" && phase !== "translate") return []
+
+  const analysis = engine.loadArtifactJson(artifactsDir, "analysis")
+  const ownership = (analysis?.functionOwnership as Record<string, string> | undefined) ?? {}
+
+  const absSrc = (rel: string | null | undefined): string | null => {
+    if (!rel) return null
+    return isAbsolute(rel) ? rel : join(sourcePath, rel)
+  }
+
+  // inventory-packages/{pkg}.json 缓存：pkg → 解析结构（parseInventoryPackage）
+  const invCache = new Map<string, InventoryPackageParsed | null>()
+  function invForPkg(pkg: string): InventoryPackageParsed | null {
+    if (invCache.has(pkg)) return invCache.get(pkg) ?? null
+    const parsed = parseInventoryPackage(artifactsDir, pkg)
+    invCache.set(pkg, parsed)
+    return parsed
+  }
+
+  // analysis-packages/{pkg}.json 聚合缓存：pkg → subprograms[]
+  // analysis-packages/{pkg}.json 缓存：pkg → subprograms[]（parseAnalysisPackage）
+  const anaCache = new Map<string, any[] | null>()
+  function subprogramsForPkg(pkg: string): any[] | null {
+    if (anaCache.has(pkg)) return anaCache.get(pkg) ?? null
+    const parsed = parseAnalysisPackage(artifactsDir, pkg)
+    const subs = parsed?.subprograms ?? null
+    anaCache.set(pkg, subs)
+    return subs
+  }
+
+  const generated: string[] = []
+
+  for (const u of targetUnits) {
+    const pkg = pkgOf(u)
+    const rootRef = refOf(u)
+    const inv = invForPkg(pkg)
+    const rootIdx = inv ? inv.refNames.indexOf(rootRef) : -1
+    const rootProc = rootIdx >= 0 ? inv!.procs[rootIdx] : null
+
+    // cargo FUNCTION（同包，fPkg = pkgOf(func) 与 owner 同包）
+    const cargoFuncs: Array<{ ref: string; pkg: string; proc: any | null }> = []
+    for (const [func, owner] of Object.entries(ownership)) {
+      if (owner !== u) continue
+      const fRef = refOf(func)
+      const fPkg = pkgOf(func)
+      const fInv = invForPkg(fPkg)
+      const fIdx = fInv ? fInv.refNames.indexOf(fRef) : -1
+      cargoFuncs.push({ ref: fRef, pkg: fPkg, proc: fIdx >= 0 ? fInv!.procs[fIdx] : null })
+    }
+
+    const sliceDir = join(artifactsDir, "shard-inputs", pkg, rootRef)
+    mkdirSync(sliceDir, { recursive: true })
+
+    // ── source.sql：根 + cargo 源码片段 ──
+    const sourceParts: string[] = []
+    const sourceFiles: Array<{ role: string; ref: string; lineRange: [number, number]; file: string | null }> = []
+    const appendSlice = (role: string, ref: string, proc: any | null, bodyFile: string | null) => {
+      if (!proc || !Array.isArray(proc.lineRange) || proc.lineRange.length !== 2) {
+        sourceParts.push(`-- ⚠️ ${role} ${ref}: lineRange 缺失，无法抽取源码（按 refName 自行定位）`)
+        sourceFiles.push({ role, ref, lineRange: [0, 0], file: bodyFile })
+        return
+      }
+      const [s, e] = [Number(proc.lineRange[0]), Number(proc.lineRange[1])]
+      const abs = absSrc(bodyFile)
+      sourceFiles.push({ role, ref, lineRange: [s, e], file: bodyFile })
+      if (!abs || !existsSync(abs)) {
+        sourceParts.push(`-- ⚠️ ${role} ${ref}: 源码文件不存在 (${bodyFile ?? "无 bodyFile"})`)
+        return
+      }
+      try {
+        const snippet = extractLineRange(abs, s, e)
+        sourceParts.push(`-- === ${role} ${ref} (pkg=${pkg}) lines ${s}-${e} of ${bodyFile} ===\n${snippet}`)
+      } catch (err: any) {
+        sourceParts.push(`-- ⚠️ ${role} ${ref}: 抽取失败 ${err.message}`)
+      }
+    }
+    appendSlice("根", rootRef, rootProc, inv?.bodyFile ?? null)
+    for (const c of cargoFuncs) {
+      const cInv = invForPkg(c.pkg)
+      appendSlice("cargo FUNCTION", c.ref, c.proc, cInv?.bodyFile ?? null)
+    }
+    safeWriteFile(join(sliceDir, "source.sql"), sourceParts.join("\n\n"))
+
+    // ── inventory-slice.json（analyze）──
+    if (phase === "analyze") {
+      const slice = {
+        unitId: u,
+        packageName: pkg,
+        root: rootProc ? { ref: rootRef, proc: rootProc } : null,
+        cargo: cargoFuncs.map(c => ({ ref: c.ref, pkg: c.pkg, proc: c.proc })),
+      }
+      safeWriteFile(join(sliceDir, "inventory-slice.json"), JSON.stringify(slice, null, 2))
+    }
+
+    // ── analysis-slice.json（translate）──
+    let analysisMissing = false
+    if (phase === "translate") {
+      const subs = subprogramsForPkg(pkg)
+      if (subs === null) {
+        analysisMissing = true
+        safeWriteFile(join(sliceDir, "analysis-slice.json"), JSON.stringify({ unitId: u, packageName: pkg, subprograms: [] }, null, 2))
+      } else {
+        // 按oracle name 匹配根 + cargo（cargo 同包）
+        const wantNames = new Set<string>()
+        if (rootProc?.name) wantNames.add(String(rootProc.name))
+        for (const c of cargoFuncs) if (c.proc?.name) wantNames.add(String(c.proc.name))
+        const matched = subs.filter((sp: any) => sp && wantNames.has(String(sp.name)))
+        safeWriteFile(join(sliceDir, "analysis-slice.json"), JSON.stringify({ unitId: u, packageName: pkg, subprograms: matched }, null, 2))
+      }
+    }
+
+    // ── meta.json ──
+    const meta = {
+      unitId: u,
+      pkg,
+      ref: rootRef,
+      phase,
+      cargoFuncs: cargoFuncs.map(c => ({ ref: c.ref, pkg: c.pkg })),
+      sourceFiles,
+      analysisMissing,
+    }
+    safeWriteFile(join(sliceDir, "meta.json"), JSON.stringify(meta, null, 2))
+
+    generated.push(...unitSliceRelPaths(u, phase))
+  }
+
+  return generated
+}
+
+/**
+ * 构建依赖签名预注入块（translate 专属，硬输入边界的一部分）。
+ *
+ * 按 analysis.callGraph 把本分片 unit 调用的、已完成 unit 的 Java 方法签名内联到 workOrder，worker
+ * 不再 read translations/{pkg}/translation.json（消除"读聚合 translation 顺手全做"+ context 泄漏）。
+ * - 同包跨单元 / 跨包已完成：读 translations/{目标包}/translation.json 的 subprogramMethods，按
+ *   oracleName（大小写不敏感）匹配 callee ref，注入 {oracleName, javaClass, javaMethod, javaFile}。
+ * - 跨包未完成（拓扑序在后）：输出 TODO 占位，worker 标 TODO，review/fix 兜底（与 translator.md 一致）。
+ * - 第一分片无依赖 / callGraph 空 → 返回 ""。
+ *
+ * 容错：translation.json 不存在 / parse 失败 / 无匹配方法 → 该 callee 标 TODO（不阻断 dispatch）。
+ */
+export function buildDependencySignaturesBlock(
+  artifactsDir: string,
+  targetUnits: readonly string[],
+  completedUnitIds: readonly string[],
+): string {
+  if (targetUnits.length === 0) return ""
+  const analysis = engine.loadArtifactJson(artifactsDir, "analysis")
+  const callGraph = (analysis?.callGraph as Record<string, string[]> | undefined) ?? {}
+  const completedPkgsUpper = new Set(completedUnitIds.map(u => pkgOf(u).toUpperCase()))
+
+  // 包 → 聚合 translation.json 的 subprogramMethods 缓存（多个 callee 命中同包只读一次）
+  const methodsCache = new Map<string, Array<{ oracleName: string; javaClass: string; javaMethod: string; javaFile?: string | null }> | null>()
+  function methodsForPkg(pkg: string): Array<{ oracleName: string; javaClass: string; javaMethod: string; javaFile?: string | null }> | null {
+    if (methodsCache.has(pkg)) return methodsCache.get(pkg) ?? null
+    const p = join(artifactsDir, "translations", pkg, "translation.json")
+    if (!existsSync(p)) { methodsCache.set(pkg, null); return null }
+    try {
+      const t = JSON.parse(readFileSync(p, "utf-8"))
+      const methods = Array.isArray(t?.subprogramMethods) ? t.subprogramMethods : []
+      methodsCache.set(pkg, methods)
+      return methods
+    } catch {
+      methodsCache.set(pkg, null)
+      return null
+    }
+  }
+
+  const blocks: string[] = []
+  let hasAny = false
+
+  for (const u of targetUnits) {
+    const pkg = pkgOf(u)
+    const rootRef = refOf(u)
+    const callees = callGraph[`${pkg}.${rootRef}`] ?? []
+    if (callees.length === 0) continue
+
+    const lines: string[] = [`### unit ${u} 调用：`]
+    let unitHas = false
+    for (const callee of callees) {
+      const tPkg = pkgOf(callee)
+      const tRef = refOf(callee)
+      // 仅已完成包（含同包 prior unit）的签名可读；未完成 → TODO
+      if (!completedPkgsUpper.has(tPkg.toUpperCase())) {
+        lines.push(`- // TODO: 跨包调用 ${callee} 待对接（目标 unit 尚未翻译）`)
+        unitHas = true
+        continue
+      }
+      const methods = methodsForPkg(tPkg)
+      const matched = (methods ?? []).filter(m => String(m.oracleName).toUpperCase() === tRef.toUpperCase())
+      if (matched.length === 0) {
+        lines.push(`- // TODO: ${callee} 待对接（目标包已翻译但未找到该子程序签名）`)
+        unitHas = true
+        continue
+      }
+      for (const m of matched) {
+        const fileTag = m.javaFile ? `  (file: ${m.javaFile})` : ""
+        lines.push(`- ${callee} → ${m.javaClass}#${m.javaMethod}${fileTag}`)
+      }
+      unitHas = true
+    }
+    if (unitHas) {
+      blocks.push(lines.join("\n"))
+      hasAny = true
+    }
+  }
+
+  if (!hasAny) return ""
+  return [
+    `## 依赖签名（已预注入，勿再 read translations/*/translation.json）`,
+    `下列本分片 unit 调用的、已翻译目标的 Java 方法签名由引擎从聚合 translation.json 提取内联。`,
+    `跨包未完成目标标 TODO，按 translator 规约占位，review/fix 兜底。`,
+    ...blocks,
+  ].join("\n")
+}
+
+/**
  * 构建分片 work order 的「单元读取清单」（中间文件，软约束）：对本分片每个 targetUnit 精准列出
  * 要读的源码文件 + 行范围（sed -n）+ cargo FUNCTION + FSD/依赖聚合路径。数据确定性取自
  * inventory-packages（lineRange/bodyFile）+ analysis.json（functionOwnership/callGraph）。
@@ -2189,111 +2723,44 @@ export function buildUnitScopeBlock(
 ): string {
   if (targetUnits.length === 0) return ""
   if (phase !== "analyze" && phase !== "translate") return ""
+  // 切片由 generateUnitSlices 在 dispatch 时落盘（用 sourcePath）；本函数仅生成「单元读取清单」文本，
+  // 引导 worker read 切片文件。sourcePath/completedUnitIds 保留入参以兼容调用方（依赖签名由
+  // buildDependencySignaturesBlock 独立生成，不复用此处）。
+  void sourcePath
+  void completedUnitIds
 
   const analysis = engine.loadArtifactJson(artifactsDir, "analysis")
   const ownership = (analysis?.functionOwnership as Record<string, string> | undefined) ?? {}
-  const callGraph = (analysis?.callGraph as Record<string, string[]> | undefined) ?? {}
 
-  // inventory-packages 的 bodyFile/specFile 是相对 sourcePath 的路径；worker subagent 的 cwd
-  // 是 opencode 项目根（≠ sourcePath），故 sed 命令必须用绝对路径——否则找不到文件。
-  // 与代码库"全部消费绝对路径，消除 cwd 依赖"原则一致（见 dispatch 注释）。
-  const absSrc = (rel: string | null | undefined): string | null | undefined => {
-    if (!rel) return rel
-    return isAbsolute(rel) ? rel : join(sourcePath, rel)
-  }
-
-  // inventory-packages/{pkg}.json 缓存：refName → { lineRange, bodyFile }
-  const procCache = new Map<string, Map<string, { lineRange: [number, number]; bodyFile: string | null | undefined }>>()
-  function refMapForPkg(pkg: string): Map<string, { lineRange: [number, number]; bodyFile: string | null | undefined }> | null {
-    if (procCache.has(pkg)) return procCache.get(pkg)!
-    const invPkgPath = join(artifactsDir, "inventory-packages", `${pkg}.json`)
-    if (!existsSync(invPkgPath)) { procCache.set(pkg, new Map()); return procCache.get(pkg)! }
-    let invPkg: any
-    try {
-      invPkg = JSON.parse(readFileSync(invPkgPath, "utf-8"))
-    } catch {
-      procCache.set(pkg, new Map()); return procCache.get(pkg)!
-    }
-    const procs: any[] = Array.isArray(invPkg.procedures) ? invPkg.procedures : []
-    const refNames = refNamesForPackage(procs.map((p: any) => p.name))
-    const bodyFile = invPkg.bodyFile ?? invPkg.specFile // 过程实现体在 body；standalone 虚拟包 bodyFile=源文件
-    const m = new Map<string, { lineRange: [number, number]; bodyFile: string | null | undefined }>()
-    procs.forEach((p: any, i: number) => {
-      const ref = refNames[i]
-      if (ref && Array.isArray(p.lineRange) && p.lineRange.length === 2) {
-        m.set(ref, { lineRange: [Number(p.lineRange[0]), Number(p.lineRange[1])], bodyFile })
-      }
-    })
-    procCache.set(pkg, m)
-    return m
-  }
-
-  // 已完成 unit 的所属包（大写集合，大小写不敏感匹配；拼路径时用原大小写 tPkg）
-  const completedPkgsUpper = new Set(completedUnitIds.map(u => pkgOf(u).toUpperCase()))
   const lines: string[] = [
     `## 本分片单元读取清单（精准范围 — 只读这些，禁止 read 整包源码）`,
-    `按下列 sed -n 命令抽取源码片段（路径为绝对路径，直接执行即可）；禁止 read 整个包 body/spec 文件。`,
+    `引擎已为本分片每个 unit 预切源码/结构到 shard-inputs/{pkg}/{ref}/，直接 read 切片文件；禁止 read 整个包 body/spec 文件、inventory-packages/{pkg}.json、analysis-packages/{pkg}.json。`,
   ]
 
   for (const u of targetUnits) {
     const pkg = pkgOf(u)
     const rootRef = refOf(u)
-    const refMap = refMapForPkg(pkg)
-    const root = refMap?.get(rootRef)
     lines.push(`### unit ${u}`)
-    if (root) {
-      const [s, e] = root.lineRange
-      const src = absSrc(root.bodyFile)
-      lines.push(`- 根 ${rootRef}：源码 \`${src}\` 行 ${s}-${e} → \`sed -n '${s},${e}p' '${src}'\``)
-    } else {
-      lines.push(`- 根 ${rootRef}：lineRange 未在 inventory-packages/${pkg}.json 找到（按 refName 自行定位，仅抽该子程序片段，路径相对 sourcePath=${sourcePath || "（未注入）"}）`)
-    }
-    // cargo FUNCTION
-    for (const [func, owner] of Object.entries(ownership)) {
-      if (owner !== u) continue
-      const fRef = refOf(func)
-      const fPkg = pkgOf(func)
-      const fm = refMapForPkg(fPkg)?.get(fRef)
-      if (fm) {
-        const [s, e] = fm.lineRange
-        const src = absSrc(fm.bodyFile)
-        lines.push(`- cargo FUNCTION ${fRef}：源码 \`${src}\` 行 ${s}-${e} → \`sed -n '${s},${e}p' '${src}'\``)
-      } else {
-        lines.push(`- cargo FUNCTION ${fRef}：lineRange 未找到（按 refName 自行定位，仅抽该子程序片段）`)
-      }
-    }
-    // 阶段产物/输入路径
+
     if (phase === "analyze") {
-      // 输出路径：per-unit 结构 + 根 FSD + 各 cargo FUNCTION FSD（cargo 用 func 所属包，与 validator 一致）
+      lines.push(`- 切片目录：shard-inputs/${pkg}/${rootRef}/（source.sql + inventory-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
       const outParts = [`analysis-packages/${pkg}/${rootRef}.json（结构）`, `fsd/${pkg}/${rootRef}.md（FSD）`]
       for (const [func, owner] of Object.entries(ownership)) {
         if (owner === u) outParts.push(`fsd/${pkgOf(func)}/${refOf(func)}.md（cargo FSD）`)
       }
       lines.push(`- 输出：${outParts.join(" + ")}`)
     } else {
-      // translate：FSD 输入（根 + cargo）
+      // translate
+      lines.push(`- 切片目录：shard-inputs/${pkg}/${rootRef}/（source.sql + analysis-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
       const fsdInputs = [`fsd/${pkg}/${rootRef}.md`]
       for (const [func, owner] of Object.entries(ownership)) if (owner === u) fsdInputs.push(`fsd/${pkgOf(func)}/${refOf(func)}.md`)
       lines.push(`- FSD 输入：${fsdInputs.join(", ")}`)
-      // 依赖聚合 translation：跨包调用目标（已完成分片）+ 本包聚合（同包跨单元）
-      // 包名比较大小写不敏感（与文件其余处一致）；depPkgs 保留原大小写用于拼路径
-      const depPkgs = new Set<string>()
-      const cgKey = `${pkg}.${rootRef}`
-      for (const tgt of (callGraph[cgKey] ?? [])) {
-        const tPkg = pkgOf(tgt)
-        if (tPkg.toUpperCase() !== pkg.toUpperCase() && completedPkgsUpper.has(tPkg.toUpperCase())) depPkgs.add(tPkg)
-      }
-      // 同包跨单元：本包聚合 translation.json（含 prior unit 的 subprogramMethods）
-      depPkgs.add(pkg)
-      lines.push(`- 依赖聚合 translation：${[...depPkgs].map(p => `translations/${p}/translation.json`).join(", ")}（仅读 subprogramMethods 对接调用，勿顺带处理）`)
-    }
-    // 子程序结构（translate 需 analysis-packages 聚合；analyze 是产出方不读）
-    if (phase === "translate") {
-      lines.push(`- 子程序结构：analysis-packages/${pkg}.json（按本 unit 根+cargo refName 取 blocks/variables/cursors/exceptionHandlers/translationNotes）`)
+      lines.push(`- 输出：translations/${pkg}/${rootRef}.json（per-unit 翻译产物）`)
+      lines.push(`- 依赖签名：见 workOrder「依赖签名」预注入块（已内联跨包/同包跨单元调用签名，⛔ 勿 read translations/*/translation.json）`)
     }
   }
 
-  lines.push(`⛔ 只处理以上 unit，只读以上列出的源码片段与文件。其他包/单元由别的分片处理。`)
+  lines.push(`⛔ 只处理以上 unit，只读以上列出的切片与文件。其他包/单元由别的分片处理。`)
   return lines.join("\n")
 }
 
@@ -2784,13 +3251,16 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const si = currentEntry?.incrementalContext?.shardIndex
               const ts = currentEntry?.incrementalContext?.totalShards
               if (si !== undefined && ts !== undefined) {
-                const nextPkgs = currentEntry!.incrementalContext!.targetPackages
-                const shardInfo = `📦 分片 ${si + 1}/${ts}（包: ${nextPkgs.join(", ")}）`
+                const ic = currentEntry!.incrementalContext!
+                const isUnit = !!(ic.targetUnits?.length)
+                const shardTarget = (isUnit ? ic.targetUnits : ic.targetPackages) ?? []
+                const shardLabel = isUnit ? "PROCEDURE 单元" : "包"
+                const shardInfo = `📦 分片 ${si + 1}/${ts}（${shardLabel}: ${shardTarget.join(", ")}）`
                 getLogger().info("[advance]", `分片切换: ${completedPhase} 分片 ${si + 1}/${ts}`)
                 return {
                   title: `分片 ${si + 1}/${ts}: ${completedPhase}`,
                   output: `✔ ${completedPhase} 分片 ${si}/${ts} 完成，进入分片 ${si + 1}/${ts}。\n${shardInfo}\n\n📌 调用 todowrite 更新进度（${completedPhase} 保持 in_progress，备注分片 ${si + 1}/${ts}）\n\n⏹ 请输出 WORKER_SUMMARY 并结束当前工作——编排者会调度下一分片。`,
-                  metadata: { runId, phase: completedPhase, shardIndex: si, totalShards: ts, nextAction: "dispatch" },
+                  metadata: { runId, phase: completedPhase, shardIndex: si, totalShards: ts, targetUnits: ic.targetUnits, targetPackages: ic.targetPackages, nextAction: "dispatch" },
                 }
               }
             }
@@ -2867,10 +3337,9 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
 
           // ── generateReviewSummary — review 阶段代码聚合 review-summary.json（reduce，零 LLM）──
-          // review 按包分片后，每个分片只写本分片包的 translations/{pkg}/review.json，
-          // 没有任何单个 agent 看得到全部包。agent 写完本分片 review.json 后调本 action，
-          // 由代码读取所有 per-package review.json 聚合成顶层 review-summary.json（advance 据其推导 D8）。
-          // 幂等：每个分片都可调用，最终分片产出的 summary 覆盖全部包。
+          // review 项目级单次审核：reviewer 写一个 artifactsDir/review.json（packages[] 覆盖全部包）。
+          // 本 action 读 review.json（语义）+ review-static.json（静态）合并成顶层 review-summary.json
+          // （advance 据其 allPassed 推导 D8）。幂等：可重复调用。
           case "generateReviewSummary": {
             if (!args.runId) throw new Error("runId required")
             const runId = args.runId
@@ -2878,7 +3347,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             try {
               const r = buildReviewSummary(artifactsDir)
               const warn = r.warnings.length > 0
-                ? `\n\n⚠️ ${r.warnings.length} 个 per-package review.json 跳过（解析/校验失败）：\n${r.warnings.map(w => `  - ${w}`).join("\n")}`
+                ? `\n\n⚠️ ${r.warnings.length} 个 review.json packages[] 条目跳过（解析/校验失败）：\n${r.warnings.map(w => `  - ${w}`).join("\n")}`
                 : ""
               return {
                 title: "Review Summary Generated",
@@ -2888,7 +3357,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             } catch (e: any) {
               return {
                 title: "Review Summary Generation Failed",
-                output: `✖ review-summary 聚合失败：${e.message}\n\n可重试 workflow({action:"generateReviewSummary", runId:"${runId}"})；若反复失败，检查 translations/*/review.json 是否完整。`,
+                output: `✖ review-summary 聚合失败：${e.message}\n\n可重试 workflow({action:"generateReviewSummary", runId:"${runId}"})；若反复失败，检查 artifactsDir/review.json 的 packages[] 是否覆盖全部包。`,
                 metadata: { runId, error: e.message },
               }
             }
@@ -3482,10 +3951,51 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
+            // review：dispatch 前 run Step A 确定性静态扫描 → review-static.json（零 LLM）。
+            // review 是项目级单次审核（无分片）：主线（branchedFrom 空）一次全量扫；
+            // fix 回环（branchedFrom=review）增量重扫 fixedPackages + 与旧 review-static.json 合并
+            // （删旧中涉及包 finding 再加新），保证 fix 改动后静态结果新鲜，避免假阴/死循环。
+            // mvn 不可用 → scanner 内部 checkstyle/pmd 优雅跳过(toolSkipped 标记)，grep 脚本照跑。
+            if (run.currentPhase === "review") {
+              const planArt = engine.loadArtifactJson(artifactsDir, "plan")
+              const artifactId = (planArt?.targetProject as any)?.artifactId
+              if (artifactId) {
+                const projectRoot = join(resolveProjectRoot(), "generated", artifactId)
+                const targetPkgs = currentEntry?.incrementalContext?.targetPackages as string[] | undefined
+                const isFixLoop = currentEntry?.branchedFrom === "review"
+                const staticPath = join(artifactsDir, "review-static.json")
+                try {
+                  if (isFixLoop) {
+                    scanReviewStatic(artifactsDir, projectRoot, { targetPackages: targetPkgs, mode: "incremental" })
+                  } else if (!existsSync(staticPath)) {
+                    scanReviewStatic(artifactsDir, projectRoot, { mode: "full" })
+                  }
+                  // else review-static.json 已存在（如 reviewer 重试 dispatch）：复用，不重扫
+                } catch (e: any) {
+                  getLogger().warn("[dispatch]", `review 静态扫描失败（不阻断 dispatch）: ${e.message}`)
+                }
+              } else {
+                getLogger().warn("[dispatch]", "review 静态扫描跳过：plan.json 缺失 targetProject.artifactId")
+              }
+            }
+
             // 检测当前阶段是否有 artifact 校验错误（advance rejected 后重新 dispatch 的场景）
             // 重新执行 Zod 校验，如果有错误则注入到 workOrder 让 Worker 修正
             const artifactValidationError = validateArtifactOnDisk(run)
 
+            // activeShardPlan 在分支前计算，供 workOrder 构造 + 返回块 shardLine 共用
+            const activeShardPlan = engine.getShardPlan(run)
+
+            // analyze/translate 分片模式：用 .md 模板渲染 workOrder（取代编排者即兴拼凑）。
+            // 仅真分片（activeShardPlan + shardIndex 已设）走模板——单分片（shards.length===1，不设
+            // shardPlan）回退 workOrderParts，否则模板「只处理 targetUnits」硬约束在 targetUnits 空时误导 worker。
+            const isShardedWorkerPhase = (run.currentPhase === "analyze" || run.currentPhase === "translate")
+              && !!activeShardPlan
+              && currentEntry?.incrementalContext?.shardIndex !== undefined
+            let workOrder: string
+            if (isShardedWorkerPhase) {
+              workOrder = buildShardedWorkerOrder(run, currentEntry, artifactsDir, artifactValidationError)
+            } else {
             // 构建 Work Order prompt
             const workOrderParts = [
               `执行工作流 ${run.runId} 的 ${run.currentPhase} 阶段（${phaseConfig.description ?? run.currentPhase}）。`,
@@ -3515,6 +4025,35 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   workOrderParts.push(`  - { packageName: ${f.packageName}, file: ${f.file}, line: ${f.line ?? "null"}, issue: ${JSON.stringify(f.issue)} }`)
                 }
               }
+              // 静态扫描待修（独立通道，与 previousFindings 语义分开）：仅 review 触发的 fix 注入。
+              // 静态 finding 是确定性工具扫出的规约问题，按 file:line 直接修，修完会被 Step A 重扫验证，
+              // 无需语义判断。过滤到本批 fixedPackages（+ UNKNOWN 归因失败的，rare，一并列入供 grep 修复）。
+              if (run.currentPhase === "fix" && currentEntry?.branchedFrom === "review") {
+                const staticPath = join(artifactsDir, "review-static.json")
+                if (existsSync(staticPath)) {
+                  try {
+                    const sf = JSON.parse(readFileSync(staticPath, "utf-8")) as { findings?: Array<{ packageName?: string; file?: string; line?: number | null; rule?: string; severity?: string; category?: string; message?: string }> }
+                    const fixedSet = new Set((currentEntry?.incrementalContext?.targetPackages ?? []).map((p: string) => p.toUpperCase()))
+                    const relevant = (sf.findings ?? []).filter(f => {
+                      const pkg = (f.packageName ?? "").toUpperCase()
+                      return pkg === "UNKNOWN" || fixedSet.size === 0 || fixedSet.has(pkg)
+                    })
+                    if (relevant.length > 0) {
+                      workOrderParts.push(
+                        ``,
+                        `## 静态扫描待修（review-static.json，确定性工具扫出，按 file:line 直接修）`,
+                        `- 这些是 Step A 工具/grep 扫出的规约问题（非语义判断），直接定位修复；修完 review 会重扫验证`,
+                        `- 与上方 previousFindings（语义旧问题）分开处理：不需要「核对是否已修复」，直接改`,
+                      )
+                      for (const f of relevant) {
+                        workOrderParts.push(`  - { file: ${f.file}, line: ${f.line ?? "null"}, severity: ${f.severity}, category: ${f.category}, rule: ${f.rule}, issue: ${JSON.stringify(f.message ?? "")} }`)
+                      }
+                    }
+                  } catch (e: any) {
+                    getLogger().warn("[dispatch]", `读取 review-static.json 注入 fix 静态段失败: ${e.message}`)
+                  }
+                }
+              }
             }
 
             // dedup：注入扫描结果指引（skipped 时指示 agent 仅收尾）
@@ -3540,7 +4079,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
             // 上游 artifact 路径列表：明确告诉 Worker 要读取哪些文件及完整路径
             // 复用上方已取的 currentEntry（同一 run 同一 dispatch，避免重复线性扫描）
-            const activeShardPlan = engine.getShardPlan(run)
+            // activeShardPlan 已在分支前计算（上方），此处直接复用
             let upstream = UPSTREAM_ARTIFACTS[run.currentPhase ?? ""]
             if (upstream && upstream.length > 0) {
               // fix 阶段过滤只注入对应 triggerPhase 的 summary
@@ -3557,6 +4096,17 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   .flatMap(i => activeShardPlan.shards[i] ?? [])
                 const shardTargetPkgs = currentEntry?.incrementalContext?.targetPackages ?? []
                 const shardTargetUnits = currentEntry?.incrementalContext?.targetUnits ?? []
+                // analyze/translate unit 模式 → dispatch 前预切 per-unit 切片（硬输入边界）。
+                // narrowUpstreamForShard 的 unit 路径会把整包 inventory-packages/analysis-packages 替换为
+                // 这些切片路径，故必须先落盘。容错：切片生成失败不阻断 dispatch（warn，回退整包 upstream）。
+                if (shardTargetUnits.length > 0 && (run.currentPhase === "analyze" || run.currentPhase === "translate")) {
+                  try {
+                    const srcPath = String((run.metadata as Record<string, unknown>).sourcePath ?? "")
+                    generateUnitSlices(`${ARTIFACT_DIR}/${run.runId}`, shardTargetUnits, run.currentPhase, srcPath)
+                  } catch (e: any) {
+                    getLogger().warn("[dispatch]", `generateUnitSlices 失败（回退整包 upstream）: ${e.message}`)
+                  }
+                }
                 // translate unit 模式需 functionOwnership 展开 cargo FUNCTION 的 FSD
                 let functionOwnership: Record<string, string> | undefined
                 if (shardTargetUnits.length > 0) {
@@ -3604,6 +4154,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   String((run.metadata as Record<string, unknown>).sourcePath ?? ""),
                 )
                 if (scopeBlock) workOrderParts.push("", scopeBlock)
+                // translate 专属：依赖签名预注入（取代 worker 读 translations/*/translation.json）
+                if (run.currentPhase === "translate") {
+                  const depBlock = buildDependencySignaturesBlock(
+                    `${ARTIFACT_DIR}/${run.runId}`, units, completedUnitIds,
+                  )
+                  if (depBlock) workOrderParts.push("", depBlock)
+                }
               }
               // 顶部 scope banner（最高优先级，置于 workOrder 最前）：分片 agent 常越界处理其他包/单元，
               // 靠「分片信息」中段提示不够醒目，故在最前再加强约束（[[opencode-todowrite-prompt-driven]] banner 模式）。
@@ -3628,6 +4185,24 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 workOrderParts.push(
                   `- projectRoot: ${projectRoot}  ← Java/项目文件写入此目录`,
                 )
+              }
+            }
+
+            // Step B 聚焦语义审查清单（review 阶段，Stage 2）：信号选点 + 圈片段，注入 workOrder。
+            // review 项目级单次审核：fix 回环用 targetPackages(fixedPackages)，主线用 analysis.packageNames 全包。
+            // 让 reviewer 只对有信号的过程做 #1-#9 语义审，无信号的纯 CRUD 跳过（省 LLM，靠 Step A 兜底）。
+            if (run.currentPhase === "review" && planForDispatch) {
+              const artifactId = (planForDispatch.targetProject as any)?.artifactId
+              if (artifactId) {
+                const focusPkgs = (currentEntry?.incrementalContext?.targetPackages as string[] | undefined)
+                  ?? (engine.loadArtifactJson(`${ARTIFACT_DIR}/${run.runId}`, "analysis")?.packageNames as string[] | undefined)
+                  ?? []
+                if (focusPkgs.length > 0) {
+                  const projectRoot = join(resolveProjectRoot(), "generated", artifactId)
+                  const sourcePath = String((run.metadata as Record<string, unknown>).sourcePath ?? "")
+                  const focusBlock = buildReviewFocus(`${ARTIFACT_DIR}/${run.runId}`, focusPkgs, sourcePath, projectRoot)
+                  if (focusBlock) workOrderParts.push("", focusBlock)
+                }
               }
             }
 
@@ -3691,24 +4266,68 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               `如果写入 artifact 时遇到问题，在你的输出中说明，编排者会处理。`,
             )
 
-            const workOrder = workOrderParts.join("\n")
+            workOrder = workOrderParts.join("\n")
+            } // end else（非 analyze/translate 走 workOrderParts）
 
             const banner = formatPhaseStartBanner(run.currentPhase)
+
+            // 分片信息：让编排者对【每个】分片（含首分片）都能写出 shard-specific 的 worker 派发指令。
+            // 修复前首分片走跨阶段 advance（通用 output）+ 通用 dispatch output → 编排者写出"处理所有包"
+            // 的通用 prompt；后续分片走同阶段 advance（shard-specific）才正确。此处统一在 dispatch output
+            // 带分片信息，消除首分片差异（[[per-unit-hard-isolation]]）。
+            const ic = currentEntry?.incrementalContext
+            const si = ic?.shardIndex
+            const ts = ic?.totalShards ?? activeShardPlan?.shards.length
+            const isUnit = !!(ic?.targetUnits?.length)
+            const shardTarget = isUnit ? (ic!.targetUnits!) : (ic?.targetPackages ?? [])
+            const shardLine = (si !== undefined && ts !== undefined)
+              ? `\n📦 分片 ${si + 1}/${ts}（${isUnit ? "PROCEDURE 单元" : "包"}: ${shardTarget.join(", ")}）—— 只处理以上目标，勿越界（workOrder 含 scope 硬约束 + 切片读取清单）`
+              : ""
 
             // dedup 跳过时在 dispatch 输出即时告警（不只进日志/workOrder），让编排者/用户可见
             const dedupSkipNotice = dedupScanSkipped
               ? `\n⚠️ dedup 已跳过（PMD CPD 不可用）：${dedupScanSkipped.skipReason}\n   引擎已写占位 dedup.json（skipped:true），pipeline 继续——dedup 是优化项，不影响 verify 正确性验证。`
               : ""
 
+            // analyze/translate 分片：workOrder 已注入 worker 系统提示（system.transform），编排者无需中转
+            // workOrder 全文——发最小 subtask 即可。避免编排者 cat dispatch-logs/workOrder 文件污染主上下文。
+            // 其他阶段：workOrder 仅在 metadata（worker 系统提示只有 runtimeContext），编排者须逐字透传。
+            if (isShardedWorkerPhase) {
+              // 静态 subtask 触发器（.md 模板，非运行时拼接）。所有分片细节在 worker 系统提示的 workOrder 里。
+              const minimalPrompt = getSubtaskTriggerPrompt()
+              return {
+                title: `Dispatch: ${run.currentPhase}`,
+                output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n✅ workOrder 已由引擎注入 worker 系统提示。发起 SubtaskPartInput 时 prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文）：\n  "${minimalPrompt}"\n⛔ 禁止 cat/Read dispatch-logs/ 下任何 workOrder 文件，禁止把 workOrder 全文塞进 subtask.prompt——worker 已从系统提示拿到完整任务，中转会污染你的主上下文。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker WORKER_SUMMARY + advance（非 rejected）后再 dispatch 下一分片；禁止并行/批量发 subtask（translate 层级依赖，并行竞态丢方法）。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
+                metadata: {
+                  runId: run.runId,
+                  phase: run.currentPhase,
+                  agent: agentName,
+                  description: phaseConfig.description ?? run.currentPhase,
+                  workOrder: `(已注入 worker 系统提示；完整内容落盘 dispatch-logs/，编排者无需读取)`,
+                  minimalSubtaskPrompt: minimalPrompt,
+                  shardIndex: si,
+                  totalShards: ts,
+                  targetUnits: ic?.targetUnits,
+                  targetPackages: ic?.targetPackages,
+                  dispatch: true,
+                  nextAction: "dispatch",
+                },
+              }
+            }
+
             return {
               title: `Dispatch: ${run.currentPhase}`,
-              output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
+              output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n⛔ 发起 SubtaskPartInput 时 prompt 必须【逐字】= metadata.workOrder（它是完整任务**字符串**，已含分片硬约束 + 切片读取清单 + 输出路径，非文件路径）。直接放进 subtask.prompt，禁止改写/摘要/自撰任务描述，禁止让 Worker 去 Read 任何 workOrder 文件——否则 Worker 会越界处理所有 unit。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker WORKER_SUMMARY + advance（非 rejected）后再 dispatch 下一分片；禁止并行/批量发 subtask。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
               metadata: {
                 runId: run.runId,
                 phase: run.currentPhase,
                 agent: agentName,
                 description: phaseConfig.description ?? run.currentPhase,
                 workOrder,
+                shardIndex: si,
+                totalShards: ts,
+                targetUnits: ic?.targetUnits,
+                targetPackages: ic?.targetPackages,
                 dispatch: true,
                 nextAction: "dispatch",
               },
@@ -3737,7 +4356,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           .string()
           .min(1, "路径不能为空")
           .describe(
-            "相对于 artifactsDir 的文件路径，如 inventory-packages/PKG.json、translations/pkg/review.json"
+            "相对于 artifactsDir 的文件路径，如 inventory-packages/PKG.json、review.json"
           ),
         content: zFn
           .string()
@@ -3767,6 +4386,14 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           if (!realParent.startsWith(resolve(artifactsDir) + sep) && realParent !== resolve(artifactsDir)) {
             return `❌ 路径包含指向目录外的符号链接: ${args.path}`
           }
+        }
+
+        // per-unit 写入边界（unit 模式）：saveArtifact 走 args.path 不经 classifyWritePath，此处复用
+        // 同一判定。越界 → 拒绝写入并提示（不静默 redirect，让 worker 知道越界）。
+        const boundaryViolation = unitWriteBoundaryViolation(args.path, resolveUnitAllowedRefs())
+        if (boundaryViolation) {
+          getLogger().error("[saveArtifact]", `BLOCKED: ${args.path} — ${boundaryViolation}`)
+          return `❌ ${boundaryViolation}（仅处理本分片 targetUnits）`
         }
 
         // 校验：.json 文件须为合法 JSON，其他格式直接写入
@@ -3838,7 +4465,9 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       }
 
       const sourcePath = resolveSourcePath(runId)
-      const cls = classifyWritePath(filePath, artifactsDir, projectRoot, sourcePath)
+      const cls = classifyWritePath(filePath, artifactsDir, projectRoot, sourcePath, {
+        unitAllowedRefs: resolveUnitAllowedRefs(),
+      })
 
       if (cls.shouldBlock) {
         // 阻止写入：记录到 artifactsDir/_blocked-writes/ 并替换目标
@@ -3998,12 +4627,29 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           javaCodeSpec = ""
         }
         // D13 已迁至 dispatch workOrder — schema hint 不再注入 system prompt（单一来源原则）
+        // 分片硬约束 banner 置于系统提示最前（确定性兜底，压过编排者自撰的通用任务提示）
+        const shardBanner = run ? buildShardScopeBanner(run) : ""
+        // analyze/translate：注入 dispatch 持久化的 .md workOrder 作权威任务（确定性，不依赖编排者透传）。
+        // workOrder 已含 scopeBanner + Runtime Context + 切片读取清单 + 依赖签名，故替代单独的 shardBanner
+        // + runtimeContext（避免重复）。缺失（dispatch 未落盘 / 旧 run）则回退 shardBanner + runtimeContext。
+        let persistedWorkOrder: string | null = null
+        const isShardedWorkerPhase = currentWorkflowContext.phase === "analyze" || currentWorkflowContext.phase === "translate"
+        if (isShardedWorkerPhase && run) {
+          try {
+            const ce = engine.findCurrentEntry(run)
+            const si = ce?.incrementalContext?.shardIndex as number | undefined
+            persistedWorkOrder = readPersistedWorkOrder(join(ARTIFACT_DIR, currentWorkflowContext.runId), currentWorkflowContext.phase, si)
+          } catch (e: any) {
+            getLogger().warn("[workflow-engine]", `读取持久化 workOrder 失败（回退 banner+runtimeContext）: ${e.message}`)
+          }
+        }
         const parts = [
+          persistedWorkOrder ?? shardBanner,
           common,
           phaseSection,
           javaCodeSpec,
           sharedInstructions,
-          runtimeContext ? "## Runtime Context\n\n" + runtimeContext : "",
+          persistedWorkOrder ? "" : (runtimeContext ? "## Runtime Context\n\n" + runtimeContext : ""),
         ].filter((p) => p !== "")
 
         if (output) output.system = [parts.join("\n\n")]

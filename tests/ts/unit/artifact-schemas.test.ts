@@ -13,6 +13,7 @@ import {
   ScaffoldSchema,
   TranslationSchema,
   ReviewSchema,
+  ProjectReviewSchema,
   ReviewSummarySchema,
   VerifySchema,
   VerifySummarySchema,
@@ -213,6 +214,25 @@ describe("Schema 有效数据通过校验", () => {
       todoRemainingCount: 1,
     }
     expect(ReviewSchema.safeParse(data).success).toBe(true)
+  })
+
+  it("ProjectReviewSchema 通过（packages[] 覆盖多包，每包过 ReviewSchema refine）", () => {
+    const data = {
+      packages: [
+        { packageName: "PKG_A", passed: true, overallScore: 90, procedureReviews: [], mustFix: [], suggestions: [], todoRemainingCount: 0 },
+        { packageName: "PKG_B", passed: false, overallScore: 55, procedureReviews: [], mustFix: [{ file: "B.java", line: 3, issue: "x" }], suggestions: [], todoRemainingCount: 1 },
+      ],
+    }
+    expect(ProjectReviewSchema.safeParse(data).success).toBe(true)
+  })
+
+  it("ProjectReviewSchema 拒绝 passed=true 但 mustFix 非空的包条目（per-package refine 生效）", () => {
+    const data = {
+      packages: [
+        { packageName: "PKG_A", passed: true, overallScore: 90, procedureReviews: [], mustFix: [{ file: "A.java", line: 1, issue: "x" }], suggestions: [], todoRemainingCount: 0 },
+      ],
+    }
+    expect(ProjectReviewSchema.safeParse(data).success).toBe(false)
   })
 
   it("ReviewSummarySchema 通过 (allPassed=true)", () => {
@@ -452,12 +472,16 @@ describe("getArtifactFilename", () => {
 })
 
 describe("getSchemaForPhase", () => {
-  const knownPhases = ["inventory", "inventory-index", "analyze", "plan", "scaffold", "dedup", "fix"]
+  const knownPhases = ["inventory", "inventory-index", "analyze", "plan", "scaffold", "dedup", "review", "fix"]
 
   it("已知阶段都返回非 null schema", () => {
     for (const phase of knownPhases) {
       expect(getSchemaForPhase(phase), `getSchemaForPhase("${phase}") should not be null`).not.toBeNull()
     }
+  })
+
+  it("review 返回 ProjectReviewSchema（项目级单文件）", () => {
+    expect(getSchemaForPhase("review")).not.toBeNull()
   })
 
   it("未知阶段返回 null", () => {
@@ -470,8 +494,10 @@ describe("getPerPackageSchema", () => {
     expect(getPerPackageSchema("translate")).not.toBeNull()
   })
 
-  it("review 返回 ReviewSchema", () => {
-    expect(getPerPackageSchema("review")).not.toBeNull()
+  it("review 不再 per-package（改项目级单文件 review.json，packages[]）", () => {
+    // review 改项目级单次审核：reviewer 写一个 artifactsDir/review.json（packages[] 覆盖全部包），
+    // 由 getSchemaForPhase("review") = ProjectReviewSchema 校验；不再有 per-package review.json。
+    expect(getPerPackageSchema("review")).toBeNull()
   })
 
   it("verify 不再 per-package（动态结果落 verify-summary.json）", () => {

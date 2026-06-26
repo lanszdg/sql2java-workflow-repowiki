@@ -13,6 +13,7 @@ import {
   unlinkSync,
   rmSync,
   writeFileSync,
+  readFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -173,4 +174,23 @@ export function safeWriteFile(
       throw e
     }
   }
+}
+
+/**
+ * 抽取文件指定行范围（1-indexed，闭区间 [start, end]）。
+ *
+ * 用于 dispatch 前引擎预切 per-unit 源码片段（generateUnitSlices）。直接 readFileSync + split，
+ * 不 spawn sed —— 跨平台（Windows 无 sed / macOS sed 与 GNU sed 行为差异）、确定性、无 shell 依赖。
+ * inventory-packages 的 lineRange 与 buildUnitScopeBlock 的 sed -n 命令同为 1-indexed 闭区间。
+ *
+ * 容错：start < 1 截到 1，end 超过文件行数截到末行，start > end 返回空串。文件不存在抛 ENOENT
+ * （由调用方 try/catch 容错，记 warn 不阻断 dispatch）。
+ */
+export function extractLineRange(filePath: string, start: number, end: number): string {
+  const content = readFileSync(filePath, "utf-8")
+  const lines = content.split(/\r?\n/)
+  const s = Math.max(1, Math.floor(start)) - 1
+  const e = Math.min(lines.length, Math.floor(end))
+  if (s >= e) return ""
+  return lines.slice(s, e).join("\n")
 }
