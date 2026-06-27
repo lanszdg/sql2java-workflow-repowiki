@@ -949,21 +949,11 @@ function buildSharedInstructions(run: WorkflowRun): string {
 
 **分片阶段（analyze/translate）必填 \`shardIndex\`**（取 Runtime Context 的 \`shardIndex\`），advance 据此确认当前分片 Worker 已完成；shardIndex 缺失或不匹配当前分片 → advance 拒绝。非分片阶段省略 \`shardIndex\`。
 
-### 阶段小结
+### 阶段完成输出（重要：主 agent 只收你回复的最后一段文本）
 
-完成阶段工作后，必须输出本阶段工作小结，格式如下：
+完成阶段工作后，你的回复末尾输出两段文本（顺序不可颠倒）：
 
-\`\`\`
-📋 {phaseName} 阶段小结
-├─ 产出物：{列出写入的关键文件及数量}
-├─ 处理范围：{处理的包数量、子程序数量等}
-├─ 关键指标：{通过/失败数、成功率、TODO 数等}
-└─ 耗时/异常：{如有异常或特别耗时的操作，简要说明}
-\`\`\`
-
-### Worker 摘要格式
-
-返回编排者之前，输出以下格式的摘要（编排者仅保留此摘要，丢弃其余输出）：
+**1. WORKER_SUMMARY**（详细，供在 subagent session 内查阅；不进主 agent 上下文）：
 
 \`\`\`
 WORKER_SUMMARY
@@ -971,8 +961,25 @@ Phase: {currentPhase}
 Status: completed|failed
 Artifacts: {写入的关键文件列表}
 Metrics: {1-2 个关键数字，如"8 packages, 45 subprograms"}
+Notes: {异常/跳过/耗时说明，无则省略本行}
 END_SUMMARY
-\`\`\``
+\`\`\`
+
+**2. TASK_STATUS**（紧凑 JSON，≤200 tokens，必须是回复的【最后一段文本】——主 agent 的工具结果只取你最后一段 text，包成 \`<task_result>\` 注入主 agent 上下文）：
+
+\`\`\`json
+{"status":"completed","files":{写入文件数}}
+\`\`\`
+
+异常/跳过时加 \`notes\`（≤20 字）：
+\`\`\`json
+{"status":"failed","files":3,"notes":"schema 缺 direction 字段"}
+\`\`\`
+
+- 只保留核心字段：\`status\`（必须，completed|failed）+ \`files\`（写入文件数）+ \`notes\`（仅异常时，否则省略）。phase/shard/scope 等主 agent 已知，勿重复。
+- \`status\` 须与 WORKER_SUMMARY 一致。
+
+⛔ 第 2 段 TASK_STATUS 必须是回复的**最后一段文本**——其后再不得输出任何文字。WORKER_SUMMARY 留在本 subagent session 供人查阅（进入子 session 可见）。禁止在任何一段贴代码/JSON 全文/源码片段（冗长内容只 \`write\` 到文件）。`
 }
 
 /**

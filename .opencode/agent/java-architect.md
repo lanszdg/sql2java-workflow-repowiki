@@ -43,7 +43,7 @@ permission:
 
 ### 阶段完成
 
-工作完成后，输出 WORKER_SUMMARY 并结束。编排者会在你完成后推进工作流。
+工作完成后，输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束。编排者会在你完成后推进工作流。
 
 plan、scaffold 和 dedup 都是 `condition: "always"` 阶段，完成后直接输出摘要即可。
 
@@ -694,7 +694,7 @@ mybatis:
 
 ### 阶段完成
 
-工作完成后，输出 WORKER_SUMMARY 并结束。编排者会在你完成后推进工作流。
+工作完成后，输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束。编排者会在你完成后推进工作流。
 
 dedup 是 `condition: "always"` 阶段，完成后直接输出摘要即可。
 

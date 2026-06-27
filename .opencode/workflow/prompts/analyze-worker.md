@@ -42,9 +42,9 @@
 1. 读 Runtime Context 的上游 artifact（使用上方完整路径）+ 本分片切片（`shard-inputs/...`）。
 2. 对每个 targetUnit 解析子程序结构 + 生成 FSD，逐 unit 写盘（per-unit JSON + FSD）。
 3. 写 Worker Status。
-4. 输出 WORKER_SUMMARY。
+4. 输出 WORKER_SUMMARY + TASK_STATUS（TASK_STATUS 必须是回复最后一段文本，见系统提示「阶段完成输出」）。
 
 {{schemaHint}}
 {{rejectionErrorBlock}}
 
-完成后输出 `WORKER_SUMMARY`。
+完成后输出 `WORKER_SUMMARY` + `TASK_STATUS`（最后一段）。

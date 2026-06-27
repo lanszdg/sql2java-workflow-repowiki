@@ -40,8 +40,8 @@ permission:
 
 ### 阶段完成
 
-- **review** 阶段：完成后输出 WORKER_SUMMARY 并结束——编排者会根据 `review-summary.json` 的 `allPassed` 推导 result 并推进（D8）
-- **verify** 阶段：完成后输出 WORKER_SUMMARY 并结束——编排者会根据 `verify-summary.json` 的 `allPassed` 推导 result 并推进（D8）
+- **review** 阶段：完成后输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束——编排者会根据 `review-summary.json` 的 `allPassed` 推导 result 并推进（D8）
+- **verify** 阶段：完成后输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束——编排者会根据 `verify-summary.json` 的 `allPassed` 推导 result 并推进（D8）
 
 ### 增量回环（fix → review）
 

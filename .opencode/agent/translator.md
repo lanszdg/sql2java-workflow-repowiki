@@ -37,8 +37,8 @@ permission:
 
 ### 阶段完成
 
-- **translate** 阶段：`condition: "always"`，完成后输出 WORKER_SUMMARY 并结束
-- **fix** 阶段：全部修完输出 WORKER_SUMMARY（status: completed），修不完输出 WORKER_SUMMARY（status: failed，说明未修完的项）
+- **translate** 阶段：`condition: "always"`，完成后输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束
+- **fix** 阶段：全部修完输出 WORKER_SUMMARY + TASK_STATUS（status: completed），修不完输出 WORKER_SUMMARY + TASK_STATUS（status: failed，notes 填未修完项）
 
 ## PL/SQL → Java 构造映射参考
 

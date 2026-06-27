@@ -42,9 +42,9 @@
 1. 读 Runtime Context 上游 artifact + 本分片切片（`shard-inputs/...`）+ 依赖签名块。
 2. 按 procedureOrder 顺序逐 unit 翻译（根 + cargo FUNCTION），写 per-unit JSON + Java 文件。
 3. 写 Worker Status。
-4. 输出 WORKER_SUMMARY。
+4. 输出 WORKER_SUMMARY + TASK_STATUS（TASK_STATUS 必须是回复最后一段文本，见系统提示「阶段完成输出」）。
 
 {{schemaHint}}
 {{rejectionErrorBlock}}
 
-完成后输出 `WORKER_SUMMARY`。
+完成后输出 `WORKER_SUMMARY` + `TASK_STATUS`（最后一段）。

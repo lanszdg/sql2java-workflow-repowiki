@@ -37,9 +37,9 @@ permission:
 
 ### 阶段完成
 
-工作完成后，输出 WORKER_SUMMARY 并结束。编排者会在你完成后推进工作流。
+工作完成后，输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束。编排者会在你完成后推进工作流。
 
-如果遇到无法继续的错误，不要输出 WORKER_SUMMARY，直接报告错误。
+如果遇到无法继续的错误，输出 TASK_STATUS（status:failed，notes 填错误简述）并结束，让编排者可见失败信号。
 
 ## Oracle PL/SQL 构造识别参考
 
