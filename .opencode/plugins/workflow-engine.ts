@@ -4681,7 +4681,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         ].filter((p) => p !== "")
 
         const finalSystem = parts.join("\n\n")
-        if (output) output.system = [finalSystem]
+        // 必须原地 splice 修改 output.system，不能 `output.system = [finalSystem]` 赋值新数组——
+        // opencode 持有原始数组引用，赋值会丢引用导致 worker 收不到注入的 workOrder（只看到默认
+        // agent .md 方法论）。与 truncate hook（splice 保持引用）同模式。
+        if (output && Array.isArray(output.system)) output.system.splice(0, output.system.length, finalSystem)
 
         // 备份 worker 实际收到的最终系统提示，供查阅/追踪（插件侧 I/O，不消耗主 agent 上下文）。
         // system.transform 每条 message 都触发；按 sessionID 计数，每条 message 都落盘（含序号），
