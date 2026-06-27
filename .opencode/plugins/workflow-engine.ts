@@ -59,8 +59,8 @@ let activeCollector: PhaseMetricsCollector | null = null
 /** 编排 session ID 集合 — chat.params hook 中记录，system.transform hook 中用于跳过编排 session 的 prompt 注入 */
 const orchestratorSessionIds = new Set<string>()
 
-/** 已落盘系统提示的 session key 集合 — system.transform 每条 message 都触发，按 session 去重每 session 只 dump 一次 */
-const dumpedSystemPrompts = new Set<string>()
+/** 已落盘系统提示的 session 计数 — system.transform 每条 message 都触发，按 session 计数每条都 dump（追踪多轮 dispatch/重试中提示变化） */
+const dumpedSystemPrompts = new Map<string, number>()
 
 /**
  * 生成 run-<project>-YYYYMMDD-HHMMSS 格式的 runId。
@@ -4684,20 +4684,19 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         if (output) output.system = [finalSystem]
 
         // 备份 worker 实际收到的最终系统提示，供查阅/追踪（插件侧 I/O，不消耗主 agent 上下文）。
-        // system.transform 每条 message 都触发；按 sessionID 去重，每 session 只落盘一次
-        //（同一 session 内 workOrder 稳定；rejection/重试走新 dispatch → 新 session → 新文件）。
+        // system.transform 每条 message 都触发；按 sessionID 计数，每条 message 都落盘（含序号），
+        // 便于追踪多轮 dispatch/rejection 中系统提示的变化（排查「上下文没注入」类问题）。
         try {
           const sidKey = sid ? String(sid) : ""
-          const dumpKey = sidKey || `${currentWorkflowContext.phase}|nosid`
-          if (!dumpedSystemPrompts.has(dumpKey)) {
-            dumpedSystemPrompts.add(dumpKey)
-            const si = engine.findCurrentEntry(run)?.incrementalContext?.shardIndex as number | undefined
-            const dumpDir = join(ARTIFACT_DIR, currentWorkflowContext.runId, "system-prompt-dumps")
-            if (!existsSync(dumpDir)) mkdirSync(dumpDir, { recursive: true })
-            const sidShort = sidKey ? sidKey.slice(0, 8) : "nosid"
-            const name = `${currentWorkflowContext.phase}-shard${si !== undefined ? si + 1 : "x"}-${sidShort}.md`
-            writeFileSync(join(dumpDir, name), finalSystem, "utf-8")
-          }
+          const sidShort = sidKey ? sidKey.slice(0, 16) : "nosid"
+          const si = engine.findCurrentEntry(run)?.incrementalContext?.shardIndex as number | undefined
+          const dumpDir = join(ARTIFACT_DIR, currentWorkflowContext.runId, "system-prompt-dumps")
+          if (!existsSync(dumpDir)) mkdirSync(dumpDir, { recursive: true })
+          const key = sidKey || `${currentWorkflowContext.phase}|nosid`
+          const seq = (dumpedSystemPrompts.get(key) ?? 0) + 1
+          dumpedSystemPrompts.set(key, seq)
+          const name = `${currentWorkflowContext.phase}-shard${si !== undefined ? si + 1 : "x"}-${sidShort}-${seq}.md`
+          writeFileSync(join(dumpDir, name), finalSystem, "utf-8")
         } catch (e: any) {
           getLogger().warn("[workflow-engine]", `system prompt dump 失败(不影响流程): ${e.message}`)
         }
