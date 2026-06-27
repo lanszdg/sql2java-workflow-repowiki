@@ -135,7 +135,7 @@ review 是**项目级单次审核**（无分片）。当 `incrementalContext.tar
 对每个待审查的包：
 
 1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
-2. **聚焦语义审查（按 Step B 聚焦清单）**：workOrder 里若注入了 `## Step B 聚焦语义审查清单`，**只审清单列出的过程/点**——这些是有信号（高风险/游标/异常/出参/NVL/AUTONOMOUS）的过程。按清单给每个聚焦点的 PL/SQL `sed -n` 源码段 + Java 方法锚点，对照审其触发的语义类别（#1-#9）+ 工具未覆盖的 #13 OOP / #14 注释。
+2. **聚焦语义审查（按 Step B 聚焦清单）**：workOrder 里若注入了 `## Step B 聚焦语义审查清单`，**只审清单列出的过程/点**——这些是有信号（高风险/游标/异常/出参/NVL/AUTONOMOUS）的过程。按清单给每个聚焦点的 PL/SQL 源码段（引擎已按行范围切好注入 workOrder）+ Java 方法锚点，对照审其触发的语义类别（#1-#9）+ 工具未覆盖的 #13 OOP / #14 注释。
    - **无信号的过程跳过语义审**（清单末尾会注明跳过数）——它们靠 Step A 静态扫描兜底，不要逐个全审，省 LLM。
    - 若 workOrder **未注入**聚焦清单（老 run / 无信号 / 无聚焦点）：回退全量逐子程序语义审 #1-#9 + #13/#14。
    - **机械类（#10/#11/#12/#15/#16/#17/#19）已由 Step A 工具扫过（见 review-static.json），勿重复查**（toolSkipped 对应项除外，回退手审）。Java 文件路径基于 `projectRoot`（如 `{projectRoot}/src/main/java/...`）
@@ -241,47 +241,26 @@ workflow({ action: "generateReviewSummary", runId: "<runId>" })
   - `${artifactsDir}/plan.json` — 映射规则
   - `${artifactsDir}/scaffold.json` — 项目结构
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
-- **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（编译验证使用 `cd ${projectRoot} && mvn compile`）
+- **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（编译/测试验证在该目录下运行 mvn）
 
 ### 输出
 
-- `${artifactsDir}/verify-compile.log` — `mvn compile` 完整输出（tee）
-- `${artifactsDir}/verify-test.log` — `mvn test` 完整输出（tee）
+- `${artifactsDir}/verify-compile.log` — `mvn compile` 完整输出（含 stderr）
+- `${artifactsDir}/verify-test.log` — `mvn test` 完整输出（含 stderr）
 - `${artifactsDir}/verify-summary.json` — 由 `generateVerifySummary` 代码聚合，不要手写
 
 ### 工作步骤
 
-#### Step 0: 编译环境检测
+#### Step 1: 编译 + 测试（输出写日志）
 
-```bash
-which mvn && mvn --version 2>&1
-which java && java -version 2>&1
-```
+在 `${projectRoot}` 目录下依次运行 `mvn compile` 和 `mvn test`，各自把**完整输出（含 stderr）**写入对应日志：
 
-- mvn 和 java 均可用 → 执行 Step 1、Step 2。
-- 任一不可用 → 跳过 Step 1、Step 2（不要尝试安装），直接执行 Step 3。
+- `mvn compile` → `${artifactsDir}/verify-compile.log`
+- `mvn test` → `${artifactsDir}/verify-test.log`
 
-#### Step 1: 编译（tee 到日志）
+用你当前运行时原生的 shell 重定向即可（bash/cmd：`cd ${projectRoot} && mvn compile > ${artifactsDir}/verify-compile.log 2>&1`；PowerShell：`cd ${projectRoot}; mvn compile 2>&1 | Out-File ${artifactsDir}/verify-compile.log`）。先确认 mvn/java 可用；任一不可用则跳过本步（不要安装），日志留空，直接进 Step 2。不要手工解析 mvn 输出——由 `generateVerifySummary` 解析。
 
-> 仅在 Step 0 检测到环境可用时执行。
-
-```bash
-cd ${projectRoot} && mvn compile 2>&1 | tee ${artifactsDir}/verify-compile.log
-```
-
-不要手工解析编译输出——由 `generateVerifySummary` 解析。
-
-#### Step 2: 测试（tee 到日志）
-
-> 仅在 Step 0 检测到环境可用时执行。
-
-```bash
-cd ${projectRoot} && mvn test 2>&1 | tee ${artifactsDir}/verify-test.log
-```
-
-`mvn test` 全局执行，不要手工解析——由 `generateVerifySummary` 解析。
-
-#### Step 3: 调用 generateVerifySummary
+#### Step 2: 调用 generateVerifySummary
 
 ```
 workflow({ action: "generateVerifySummary", runId: "<runId>" })
@@ -289,13 +268,13 @@ workflow({ action: "generateVerifySummary", runId: "<runId>" })
 
 该 action 解析两个日志、把编译错误与测试失败归因到包、聚合 verify-summary.json。幂等，可重复调用；报错时确认日志已生成后重试。
 
-#### Step 4: 输出摘要
+#### Step 3: 输出摘要
 
-输出 WORKER_SUMMARY 并结束——编排者据 verify-summary.json 的 allPassed 推进。
+输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者据 verify-summary.json 的 allPassed 推进。
 
 ### 质量检查
 
-- [ ] Step 0 编译环境检测已执行
-- [ ] 环境可用时：`mvn compile` / `mvn test` 已执行并 tee 到对应日志
+- [ ] mvn/java 可用性已确认
+- [ ] 环境可用时：`mvn compile` / `mvn test` 已运行，完整输出（含 stderr）写入对应日志
 - [ ] 环境不可用时：跳过 mvn，直接调 generateVerifySummary
 - [ ] 已调用 `generateVerifySummary` 生成 verify-summary.json（不要手写、不要手工解析 mvn 输出）

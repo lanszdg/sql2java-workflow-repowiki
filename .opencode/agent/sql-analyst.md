@@ -281,5 +281,5 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 ### 增量恢复
 
 - `analysis.json` 由 inventory 阶段产出，始终存在，**不要重建**
-- 用 bash 检查本分片已完成的 unit：`analysis-packages/{PKG}/{unitRef}.json` 已有 + `fsd/{PKG}/` 下已有 FSD
+- 检查本分片已完成的 unit（用 Read 工具读文件是否存在）：`analysis-packages/{PKG}/{unitRef}.json` 已有 + `fsd/{PKG}/` 下已有 FSD
 - 跳过已生成且**内容完整**（无"详见"占位符）的 FSD；含占位符的重新生成；缺失的补齐
