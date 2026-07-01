@@ -139,7 +139,7 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   // 不再是 start 预生成的 upstream。generateInventory 从 artifactsDir 自行读取。
   inventory: [],
   // analyze 不注入 inventory-index.json：本包源码路径从 inventory-packages/{PKG}.json 的
-  // specFile/bodyFile 取（已收窄到本分片）；表结构从 inventory.json，callGraph 从 dependency-graph.json。
+  // headerFile/bodyFile 取（已收窄到本分片）；表结构从 inventory.json，callGraph 从 dependency-graph.json。
   analyze: ["inventory.json", "inventory-packages/*.json", "dependency-graph.json"],
   // plan 是框架设计（包映射/类型映射/规则/约定/manualReviewList），不做逐过程翻译，
   // 不需要 FSD（FSD 是 per-procedure 业务翻译说明书，给 translate 用）。manualReviewList

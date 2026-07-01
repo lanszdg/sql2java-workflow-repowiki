@@ -21,7 +21,7 @@ export function makeInventoryIndex(overrides: Record<string, unknown> = {}) {
     packages: [
       {
         name: "CORE_PKG",
-        specFile: "pkg/core_pkg.pks",
+        headerFile: "pkg/core_pkg.pks",
         bodyFile: "pkg/core_pkg.pkb",
         procedures: [
           { name: "GET_ITEM", type: "function" as const, lineRange: [10, 50] as [number, number] },
@@ -150,7 +150,7 @@ export function makeScaffold(overrides: Record<string, unknown> = {}) {
 export function makeInventoryPackage(overrides: Record<string, unknown> = {}) {
   return {
     packageName: "CORE_PKG",
-    specFile: "pkg/core_pkg.pks",
+    headerFile: "pkg/core_pkg.pks",
     bodyFile: "pkg/core_pkg.pkb",
     procedures: [
       {

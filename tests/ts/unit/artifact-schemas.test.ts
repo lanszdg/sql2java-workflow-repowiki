@@ -44,7 +44,7 @@ describe("Schema 有效数据通过校验", () => {
   it("InventoryPackageSchema 通过（有 bodyFile + procedures）", () => {
     const data = {
       packageName: "CORE_PKG",
-      specFile: "pkg/core_pkg.pks",
+      headerFile: "pkg/core_pkg.pks",
       bodyFile: "pkg/core_pkg.pkb",
       procedures: [
         {
@@ -64,7 +64,7 @@ describe("Schema 有效数据通过校验", () => {
   it("InventoryPackageSchema 通过（无 procedures，无需 bodyFile）", () => {
     const data = {
       packageName: "TYPES_PKG",
-      specFile: "pkg/types_pkg.pks",
+      headerFile: "pkg/types_pkg.pks",
       procedures: [],
       types: [{ name: "REC_TYPE", kind: "RECORD", definition: "IS RECORD(...)" }],
       variables: [],
@@ -339,7 +339,7 @@ describe("Schema 无效数据被拒绝", () => {
   it("InventoryPackageSchema 有 procedures 但无 bodyFile → refine 失败", () => {
     const data = {
       packageName: "CORE_PKG",
-      specFile: "pkg/core_pkg.pks",
+      headerFile: "pkg/core_pkg.pks",
       // 无 bodyFile
       procedures: [
         {
@@ -747,7 +747,7 @@ describe("大小写 normalize — ciEnum 自动纠正 LLM 大小写变体", () =
     const base = {
       sourcePath: "/test", scannedAt: "2026-06-01T00:00:00.000Z", scannerUsed: "regex",
       packages: [{
-        name: "PKG", specFile: "a.pks", bodyFile: "a.pkb",
+        name: "PKG", headerFile: "a.pks", bodyFile: "a.pkb",
         procedures: [{ name: "P", type: "PROCEDURE", lineRange: [1, 10] as [number, number] }],
         estimatedLoc: 10,
       }],
@@ -764,7 +764,7 @@ describe("大小写 normalize — ciEnum 自动纠正 LLM 大小写变体", () =
     const base = {
       sourcePath: "/test", scannedAt: "2026-06-01T00:00:00.000Z", scannerUsed: "regex",
       packages: [{
-        name: "PKG", specFile: "a.pks", bodyFile: "a.pkb",
+        name: "PKG", headerFile: "a.pks", bodyFile: "a.pkb",
         procedures: [{ name: "F", type: "Function", lineRange: [1, 10] as [number, number] }],
         estimatedLoc: 10,
       }],

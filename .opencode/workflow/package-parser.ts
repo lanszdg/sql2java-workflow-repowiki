@@ -19,7 +19,7 @@ export interface InventoryPackageParsed {
   refNames: string[]
   /** 原始 procedures 数组（顺序与 refNames 对齐）。 */
   procs: any[]
-  /** bodyFile ?? specFile ?? null —— 源码定位用。 */
+  /** bodyFile ?? headerFile ?? null —— 源码定位用。 */
   bodyFile: string | null
 }
 
@@ -38,7 +38,7 @@ export function parseInventoryPackage(artifactsDir: string, pkg: string): Invent
   }
   const procs: any[] = Array.isArray(inv.procedures) ? inv.procedures : []
   const refNames = refNamesForPackage(procs.map((proc: any) => proc.name))
-  const bodyFile = inv.bodyFile ?? inv.specFile ?? null
+  const bodyFile = inv.bodyFile ?? inv.headerFile ?? null
   return { refNames, procs, bodyFile }
 }
 

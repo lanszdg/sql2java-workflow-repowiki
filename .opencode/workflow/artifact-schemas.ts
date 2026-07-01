@@ -64,7 +64,7 @@ export const InventoryIndexSchema = z.object({
 
   packages: z.array(z.object({
     name: z.string(),
-    specFile: z.string().nullable().optional(),
+    headerFile: z.string().nullable().optional(),
     bodyFile: z.string().nullable().optional(),
     procedures: z.array(z.object({
       name: z.string(),
@@ -123,7 +123,7 @@ const InventoryProcedureSchema = z.object({
 
 export const InventoryPackageSchema = z.object({
   packageName: z.string(),
-  specFile: z.string().nullable().optional(),
+  headerFile: z.string().nullable().optional(),
   bodyFile: z.string().nullable().optional(),
   procedures: z.array(InventoryProcedureSchema),
   types: z.array(z.object({

@@ -42,8 +42,8 @@ const config: CaseConfig = {
     // inventory-index（两包，B 叶子在前）
     writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
       packages: [
-        { name: PKG_B, specFile: "pkg/util.pks", bodyFile: `${SOURCE_DIR_REL}/UTIL_PKG.pkb`, procedures: [{ name: "get_by_id", type: "function", lineRange: [1, 10] }], estimatedLoc: 10 },
-        { name: PKG_A, specFile: "pkg/order.pks", bodyFile: `${SOURCE_DIR_REL}/ORDER_PKG.pkb`, procedures: [{ name: "create_order", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
+        { name: PKG_B, headerFile: "pkg/util.pks", bodyFile: `${SOURCE_DIR_REL}/UTIL_PKG.pkb`, procedures: [{ name: "get_by_id", type: "function", lineRange: [1, 10] }], estimatedLoc: 10 },
+        { name: PKG_A, headerFile: "pkg/order.pks", bodyFile: `${SOURCE_DIR_REL}/ORDER_PKG.pkb`, procedures: [{ name: "create_order", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
       ],
     }))
 

@@ -34,7 +34,7 @@
 
 - ⛔ **你的完整任务已在本提示中**（由引擎注入系统提示）。**禁止 Read 任何 `.workOrder.md` 文件**——那是审计追溯用，不是你的输入；也禁止 Read `dispatch-logs/` 下任何文件。任务就在这里，直接执行。
 - ⛔ **只翻译本分片 targetUnits 列出的 PROCEDURE 单元**，禁止处理其他 unit。
-- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql`**（引擎已预切）。禁止 read 整包 body/spec、`inventory-packages/{pkg}.json`、`analysis-packages/{pkg}.json`。子程序结构读 `shard-inputs/{pkg}/{ref}/analysis-slice.json`。
+- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql`**（引擎已预切）。禁止 read 整包 body/header、`inventory-packages/{pkg}.json`、`analysis-packages/{pkg}.json`。子程序结构读 `shard-inputs/{pkg}/{ref}/analysis-slice.json`。
 - ⛔ **跨包/同包跨单元调用签名查下方「依赖签名」预注入块**（引擎已按 callGraph 内联）。禁止 read `translations/{pkg}/translation.json`。预注入块标 `// TODO` 的目标（尚未翻译）照抄占位，由 review/fix 兜底。
 - ⛔ `dependency-graph.json` 里其他包/单元只是参考，不是工作清单。
 

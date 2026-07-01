@@ -210,7 +210,7 @@ describe("renderSchemaHint", () => {
 
   it("inventory 阶段包含可选字段标记 ?", () => {
     const hint = renderSchemaHint("inventory")
-    // specFile/bodyFile 是 per-package 字段（已不渲染）；顶层 tables[].ddlFile 是 nullable optional
+    // headerFile/bodyFile 是 per-package 字段（已不渲染）；顶层 tables[].ddlFile 是 nullable optional
     expect(hint).toContain("ddlFile?:")
   })
 

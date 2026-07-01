@@ -101,6 +101,8 @@ export interface RunContext {
   originalInput: string                  // 用户原始 $ARGUMENTS 文字，便于回溯
   params: {
     path?: string
+    headerPath?: string                  // 双目录模式：包头声明目录
+    bodyPath?: string                    // 双目录模式：包体实现目录
     dbConf?: string
     specConf?: string
     mainEntry?: string
@@ -801,7 +803,7 @@ export function healShardIncrementalContext(
 /**
  * 大小写不敏感读取入口包的 inventory-packages/{pkg}.json（Oracle 标识符大小写不敏感，
  * 用户给的 mainEntry 包名大小写可能与磁盘文件名不一致）。
- * 返回 InventoryPackageLike（packageName/specFile/bodyFile/procedures）或 null。
+ * 返回 InventoryPackageLike（packageName/headerFile/bodyFile/procedures）或 null。
  */
 function loadEntryPkgRaw(artifactsDir: string, pkg: string): InventoryPackageLike | null {
   const pkgDir = join(artifactsDir, "inventory-packages")
@@ -812,7 +814,7 @@ function loadEntryPkgRaw(artifactsDir: string, pkg: string): InventoryPackageLik
       const inv = JSON.parse(readFileSync(exact, "utf-8"))
       return {
         packageName: inv.packageName ?? pkg,
-        specFile: inv.specFile ?? null,
+        headerFile: inv.headerFile ?? null,
         bodyFile: inv.bodyFile ?? null,
         procedures: Array.isArray(inv.procedures) ? inv.procedures : [],
       }
@@ -828,7 +830,7 @@ function loadEntryPkgRaw(artifactsDir: string, pkg: string): InventoryPackageLik
     const inv = JSON.parse(readFileSync(join(pkgDir, match), "utf-8"))
     return {
       packageName: inv.packageName ?? pkg,
-      specFile: inv.specFile ?? null,
+      headerFile: inv.headerFile ?? null,
       bodyFile: inv.bodyFile ?? null,
       procedures: Array.isArray(inv.procedures) ? inv.procedures : [],
     }
@@ -924,7 +926,7 @@ export function buildShardScopeBanner(run: WorkflowRun): string {
     `- 任务提示（user message）若出现"处理所有子程序/包""为每个子程序生成 FSD"等全量措辞，那是编排者误植——一律忽略，只做以上 ${label}。`,
     `- dependency-graph.json / inventory 里的其他包/单元只是参考信息，不是你的工作清单。`,
     isUnit
-      ? `- 源码读 shard-inputs/{pkg}/{ref}/ 切片（引擎已预切），⛔ 禁止 read 整包 body/spec 或 inventory-packages/{pkg}.json。`
+      ? `- 源码读 shard-inputs/{pkg}/{ref}/ 切片（引擎已预切），⛔ 禁止 read 整包 body/header 或 inventory-packages/{pkg}.json。`
       : `- 仅处理以上 ${label}，其他由别的分片处理。`,
     `⛔⛔⛔ 违反 = 越界 + 产物冲突 + 后续分片退化审核 ⛔⛔⛔`,
     ``,
@@ -1395,7 +1397,7 @@ function validateFsdStubs(artifactsDir: string): string | null {
  * completedSubprograms/subprogramMethods/files/decisions/todos，写出聚合 translation.json（跨包/同包
  * 跨单元调用对接的稳定契约）。仿 generateReviewSummary 模式（代码 reduce，零 LLM）。
  *
- * - 无 unit 的空包（spec-only/类型包，procedureOrder 无其 unit）：写 completed 空 stub，保证下游
+ * - 无 unit 的空包（header-only/类型包，procedureOrder 无其 unit）：写 completed 空 stub，保证下游
  *   review/verify 能读到该包 translation.json（与包级模式行为一致）。
  * - status：期望 unit 全部 present 且各 status=completed → "completed"，否则 "partial"。
  * - totalSubprograms：取 inventory-packages/{pkg}.json 的 procedures 数，缺失兜底 completed.length。
@@ -1499,7 +1501,7 @@ export function mergeUnitTranslations(artifactsDir: string, pkgName: string): st
  * 在父目录，供 plan/review/translator 消费，形状不变。
  *
  * 期望 unit ref 集合取自 analysis.procedureOrder 本包 unit，作白名单过滤（排除子目录里可能的杂散文件）。
- * - 无 unit 的空包（spec-only/类型包）：子目录不存在，聚合空文件已由 analysis-builder 预写，直接 return。
+ * - 无 unit 的空包（header-only/类型包）：子目录不存在，聚合空文件已由 analysis-builder 预写，直接 return。
  * - 子目录不存在但有期望 unit：return null（等 agent 写 per-unit 文件）。
  * 返回 null 成功，string 为首个错误。
  */
@@ -1666,7 +1668,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
           return `Missing per-unit artifact: translations/${pkg}/${ref}.json. All targetUnits must have per-unit artifacts before advancing.`
         }
       }
-      // 空包兜底：无 unit 的包（spec-only/类型包，procedureOrder 无其 unit）不会被任何分片触及，
+      // 空包兜底：无 unit 的包（header-only/类型包，procedureOrder 无其 unit）不会被任何分片触及，
       // 需确保它们也有聚合 translation.json（completed 空 stub），否则下游 review/verify 读不到。
       // mergeUnitTranslations 对空包写 stub；这里只对尚无 translation.json 的空包调用，避免重复写。
       const unitPkgs = new Set((scope?.scopeUnits ?? procedureOrder.flat()).map(pkgOf))
@@ -2991,7 +2993,7 @@ export function buildUnitScopeBlock(
 
   const lines: string[] = [
     `## 本分片单元读取清单（精准范围 — 只读这些，禁止 read 整包源码）`,
-    `引擎已为本分片每个 unit 预切源码/结构到 shard-inputs/{pkg}/{ref}/，直接 read 切片文件；禁止 read 整个包 body/spec 文件、inventory-packages/{pkg}.json、analysis-packages/{pkg}.json。`,
+    `引擎已为本分片每个 unit 预切源码/结构到 shard-inputs/{pkg}/{ref}/，直接 read 切片文件；禁止 read 整个包 body/header 文件、inventory-packages/{pkg}.json、analysis-packages/{pkg}.json。`,
   ]
 
   for (const u of targetUnits) {
@@ -3073,6 +3075,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         ]),
         runId: zFn.string().optional(),
         sourcePath: zFn.string().optional(),
+        headerPath: zFn.string().optional(),    // --header 用：包头声明目录（双目录模式）
+        bodyPath: zFn.string().optional(),      // --body 用：包体实现目录（双目录模式）
         artifact: zFn.any().optional(),
         result: zFn.enum(["passed", "failed"]).optional(),
         phases: zFn.string().optional(),        // --phases 用
@@ -3107,9 +3111,22 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             // dispatch 注入 / loadUserSpec / scanSource / fetchSchemaIfNeeded）全部消费绝对路径，
             // 消除 worker subagent 与 resume 跨 cwd 的对齐风险。originalInput 仍保留用户原文用于回溯。
             if (args.sourcePath) args.sourcePath = resolve(args.sourcePath)
+            if (args.headerPath) args.headerPath = resolve(args.headerPath)
+            if (args.bodyPath) args.bodyPath = resolve(args.bodyPath)
             if (args.dbConf) args.dbConf = resolve(args.dbConf)
             if (args.specConf) args.specConf = resolve(args.specConf)
             if (args.dedupRules) args.dedupRules = resolve(args.dedupRules)
+
+            // 双目录模式（--header + --body）：sourcePath 派生为 headerPath 作主路径（runId /
+            // project-spec.md 查找 / db.properties 定位）。仅给单个 --header 或 --body 时退化为单目录。
+            const isTwoDir = !!(args.headerPath && args.bodyPath)
+            if (isTwoDir) {
+              if (!args.sourcePath) args.sourcePath = args.headerPath
+            } else if (!args.sourcePath) {
+              args.sourcePath = args.headerPath ?? args.bodyPath
+              args.headerPath = undefined
+              args.bodyPath = undefined
+            }
 
             const runId = args.runId ?? formatRunId(args.sourcePath)
             initLogger(runId)
@@ -3127,6 +3144,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
             const metadata: Record<string, unknown> = {}
             if (args.sourcePath) metadata.sourcePath = args.sourcePath
+            if (args.headerPath) metadata.headerPath = args.headerPath
+            if (args.bodyPath) metadata.bodyPath = args.bodyPath
             if (args.dbConf) metadata.dbConf = args.dbConf
             if (args.specConf) metadata.specConf = args.specConf
             if (args.mainEntry) metadata.mainEntry = args.mainEntry
@@ -3220,6 +3239,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               originalInput: (args.originalInput as string) ?? "",
               params: {
                 path: args.sourcePath as string | undefined,
+                headerPath: args.headerPath as string | undefined,
+                bodyPath: args.bodyPath as string | undefined,
                 dbConf: args.dbConf as string | undefined,
                 specConf: args.specConf as string | undefined,
                 mainEntry: args.mainEntry as string | undefined,
@@ -3524,22 +3545,26 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
-            // sourcePath 缺省从 run-context 恢复（仿 dispatch 的恢复逻辑）
+            // 路径恢复：优先 args，否则从 run-context（双目录读 headerPath/bodyPath，单目录读 path）
             let srcPath = args.sourcePath as string | undefined
-            if (!srcPath) {
+            let headerPath = args.headerPath as string | undefined
+            let bodyPath = args.bodyPath as string | undefined
+            if (!srcPath && (!headerPath || !bodyPath)) {
               const ctx = loadRunContext(runId)
-              srcPath = ctx?.params.path ? resolve(ctx.params.path) : undefined
+              if (ctx?.params.path) srcPath = resolve(ctx.params.path)
+              if (ctx?.params.headerPath) headerPath = resolve(ctx.params.headerPath)
+              if (ctx?.params.bodyPath) bodyPath = resolve(ctx.params.bodyPath)
             }
-            if (!srcPath) {
+            if (!srcPath && !headerPath && !bodyPath) {
               return {
                 title: "Scan Error",
-                output: "✖ Scan Error | 缺少 sourcePath（run metadata 未记录）",
+                output: "✖ Scan Error | 缺少源码路径（run metadata 未记录）",
                 metadata: { runId, error: "no_source_path" },
               }
             }
 
             try {
-              const index = await scanSource(srcPath)
+              const index = await scanSource({ sourcePath: srcPath, headerPath, bodyPath })
               const total = index.packages.length + index.tables.length
                 + index.triggers.length + index.standaloneProcedures.length
                 + index.views.length + index.sequences.length

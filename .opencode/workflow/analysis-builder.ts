@@ -23,7 +23,7 @@ import { getLogger } from "./workflow-logger"
 interface PrescanProc { name: string; type: string; lineRange?: [number, number] }
 interface PrescanPackage {
   name: string
-  specFile?: string
+  headerFile?: string
   bodyFile?: string
   procedures: PrescanProc[]
   estimatedLoc?: number
@@ -49,7 +49,7 @@ const SQL_PSEUDO = new Set([
 
 interface CallSite { line: number; calleePkg: string; calleeProc: string }
 
-/** 读源码文件（specFile/bodyFile 相对 sourcePath） */
+/** 读源码文件（headerFile/bodyFile 相对 sourcePath） */
 function readSource(sourcePath: string, rel?: string): string {
   if (!rel) return ""
   const abs = isAbsolute(rel) ? rel : join(sourcePath, rel)
@@ -335,10 +335,10 @@ export function buildProcedureOrder(
 function heuristicComplexity(
   pkg: PrescanPackage,
   bodyCode: string,
-  specCode: string,
+  headerCode: string,
   outgoingEdges: number,
 ): { score: number; patterns: string[]; riskLevel: "low" | "medium" | "high" } {
-  const code = bodyCode + "\n" + specCode
+  const code = bodyCode + "\n" + headerCode
   const patternDefs: [string, RegExp][] = [
     ["cursor-loop", /\b(FOR\s+\w+\s+IN\s*\(|CURSOR\b|\bLOOP\b)/i],
     ["exception-block", /\bEXCEPTION\b/i],
@@ -395,7 +395,7 @@ export function buildDependencyGraphFromIndex(artifactsDir: string): {
   for (const pkg of index.packages) {
     const pkgInfo = refIndex.get(pkg.name)!
     const bodyCode = readSource(sourcePath, pkg.bodyFile)
-    if (!bodyCode) continue // spec-only 包无调用
+    if (!bodyCode) continue // header-only 包无调用
     // 2a) 点号调用 `PKG.PROC`（scanCallSites）
     const sites = scanCallSites(bodyCode)
     for (const site of sites) {
@@ -459,14 +459,14 @@ export function buildDependencyGraphFromIndex(artifactsDir: string): {
   const complexity: Record<string, { score: number; patterns: string[]; riskLevel: string }> = {}
   for (const pkg of index.packages) {
     const bodyCode = readSource(sourcePath, pkg.bodyFile)
-    const specCode = readSource(sourcePath, pkg.specFile)
+    const headerCode = readSource(sourcePath, pkg.headerFile)
     // 出边数：该包子程序的 callee 边数
     let outgoing = 0
     for (const s of (refIndex.get(pkg.name)?.subprograms ?? [])) {
       const arr = callGraph[`${pkg.name}.${s.refName}`]
       if (arr) outgoing += arr.length
     }
-    complexity[pkg.name] = heuristicComplexity(pkg, bodyCode, specCode, outgoing)
+    complexity[pkg.name] = heuristicComplexity(pkg, bodyCode, headerCode, outgoing)
   }
 
   // 5.5) PROCEDURE 级：FUNCTION 属主归属 + 单元级拓扑序 procedureOrder

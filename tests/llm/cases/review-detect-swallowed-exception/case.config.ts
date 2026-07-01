@@ -34,7 +34,7 @@ const config: CaseConfig = {
     // inventory-index（reviewer 全量审查范围的来源）
     writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
       packages: [
-        { name: PACKAGE, specFile: "pkg/bad.pks", bodyFile: "pkg/bad.pkb", procedures: [{ name: "DO_SOMETHING", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
+        { name: PACKAGE, headerFile: "pkg/bad.pks", bodyFile: "pkg/bad.pkb", procedures: [{ name: "DO_SOMETHING", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
       ],
     }))
 

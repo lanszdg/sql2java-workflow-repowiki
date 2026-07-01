@@ -36,7 +36,7 @@ const config: CaseConfig = {
   prepareArtifacts: dir => {
     writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
       packages: [
-        { name: PACKAGE, specFile: "pkg/exc.pks", bodyFile: `${SOURCE_DIR_REL}/EXC_PKG.pkb`, procedures: [{ name: "SAVE_MSG", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
+        { name: PACKAGE, headerFile: "pkg/exc.pks", bodyFile: `${SOURCE_DIR_REL}/EXC_PKG.pkb`, procedures: [{ name: "SAVE_MSG", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
       ],
     }))
 

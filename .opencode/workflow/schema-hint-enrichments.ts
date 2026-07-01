@@ -65,7 +65,7 @@ export const NON_ZOD_VALIDATION_RULES: { phases: string[]; message: string }[] =
   },
   {
     phases: ["inventory"],
-    message: "inventory.json 的 packageNames 必须覆盖 inventory-index 中所有包（含 spec-only 包：只有 constants/exceptions/variables 而没有 procedures 的包，procedures 数组为 []，bodyFile 为 null）",
+    message: "inventory.json 的 packageNames 必须覆盖 inventory-index 中所有包（含 header-only 包：只有 constants/exceptions/variables 而没有 procedures 的包，procedures 数组为 []，bodyFile 为 null）",
   },
   {
     phases: ["analyze"],
@@ -170,7 +170,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   inventory: [
-    'optional 字段（defaultValue/bodyFile/returnType/specFile/ddlFile 等）可省略或写 null，均可通过校验',
+    'optional 字段（defaultValue/bodyFile/returnType/headerFile/ddlFile 等）可省略或写 null，均可通过校验',
     'direction 自动 normalize 为大写："in"/"In"/"IN" 均等价于 "IN"，"in out"/"IN OUT" 均等价于 "IN OUT"',
     'type 自动 normalize 为小写："PROCEDURE"/"Procedure" 均等价于 "procedure"',
     'triggers.timing 自动 normalize 为小写：任意大小写均可通过',

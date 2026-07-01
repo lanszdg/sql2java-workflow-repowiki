@@ -33,7 +33,7 @@ interface PrescanProc {
   params?: PrescanParam[]; returnType?: string | null
 }
 interface PrescanPackage {
-  name: string; specFile?: string; bodyFile?: string
+  name: string; headerFile?: string; bodyFile?: string
   procedures: PrescanProc[]
   types?: { name: string; kind: string; definition: string }[]
   variables?: { name: string; type: string; defaultValue?: string | null }[]
@@ -63,7 +63,7 @@ const safeRange = (r?: [number, number]): [number, number] => r ?? [0, 0]
 function mapPackage(p: PrescanPackage) {
   return {
     packageName: p.name,
-    specFile: p.specFile ?? null,
+    headerFile: p.headerFile ?? null,
     bodyFile: p.bodyFile ?? null,
     procedures: p.procedures.map(proc => ({
       name: proc.name,

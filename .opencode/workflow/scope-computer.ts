@@ -29,7 +29,7 @@ export interface AnalysisLike {
 
 export interface InventoryPackageLike {
   packageName: string
-  specFile?: string | null
+  headerFile?: string | null
   bodyFile?: string | null
   procedures: { name: string; type: string }[]
 }
@@ -88,7 +88,7 @@ export interface EntryError {
  * 重载消歧：用户给的 refName 段若命中唯一 refName（裸名非重载 / 显式 `name__N`）→ 取之；
  * 若是裸名且该名重载（多个 `name__N`）→ 报错要求显式 refName；若不在该包子程序集 → 报错。
  *
- * subdir 校验：入口包的 `bodyFile ?? specFile` 须以 `subdir/` 开头（防指错/同名包）。
+ * subdir 校验：入口包的 `bodyFile ?? headerFile` 须以 `subdir/` 开头（防指错/同名包）。
  * subdir=null 时跳过。
  *
  * @param entryPkg 入口包的 inventory 数据（调用方从 inventory-packages/{pkg}.json 加载）
@@ -148,9 +148,9 @@ function finalize(
 ): EntryResolution | EntryError {
   // subdir 校验
   if (parsed.subdir) {
-    const file = entryPkg.bodyFile ?? entryPkg.specFile
+    const file = entryPkg.bodyFile ?? entryPkg.headerFile
     if (!file) {
-      return { ok: false, error: `入口包 ${pkg} 无 bodyFile/specFile，无法校验子目录 ${parsed.subdir}` }
+      return { ok: false, error: `入口包 ${pkg} 无 bodyFile/headerFile，无法校验子目录 ${parsed.subdir}` }
     }
     const prefix = parsed.subdir.endsWith("/") ? parsed.subdir : parsed.subdir + "/"
     // 归一化反斜杠（跨平台容忍）

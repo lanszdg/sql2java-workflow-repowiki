@@ -164,7 +164,7 @@ describe("UPSTREAM_ARTIFACTS", () => {
   })
 
   it("analyze 不注入 inventory-index.json（避免分片 worker 拿到全量包源码路径）", () => {
-    // inventory-index.json 含所有包的 specFile/bodyFile；analyze 分片 worker 只该从本包
+    // inventory-index.json 含所有包的 headerFile/bodyFile；analyze 分片 worker 只该从本包
     // inventory-packages/{PKG}.json 取源码路径，否则会读其他包源码、写出其他包的 FSD。
     expect(UPSTREAM_ARTIFACTS.analyze).not.toContain("inventory-index.json")
     // 本包源码路径来源仍在

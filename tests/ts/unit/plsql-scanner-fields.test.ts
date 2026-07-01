@@ -5,7 +5,7 @@
  *（params / returnType / types / variables / constants / columns / trigger / sequence / standalone / overload），
  * 即 inventory 阶段可下沉到 prescan、无需 LLM 的依据。
  *
- * fixture: tests/ts/fixtures/sql/tiny（覆盖 spec-only 包、重载、%ROWTYPE、UDT 列/参数、
+ * fixture: tests/ts/fixtures/sql/tiny（覆盖 header-only 包、重载、%ROWTYPE、UDT 列/参数、
  * 对象类型、PK/FK/CHECK 约束、复合 PK、分区表、序列、触发器 WHEN、视图）。
  */
 
@@ -20,7 +20,7 @@ let parserAvailable = true
 
 beforeAll(async () => {
   try {
-    result = await scanWithAST(FIXTURE_TINY)
+    result = await scanWithAST([FIXTURE_TINY], FIXTURE_TINY)
   } catch {
     // 测试环境未安装 ts-plsql-parser 时跳过（AST 字段抽取仅在 parser 可用时生效）
     parserAvailable = false
@@ -35,14 +35,14 @@ describe("plsql-scanner AST 字段抽取 (tiny fixture)", () => {
     expect(result!.scannerUsed).toBe("ast")
   })
 
-  // ── Package: spec-only 包（base_pkg，只有常量）──
-  describe("BASE_PKG (spec-only)", () => {
-    itAst("识别为 spec-only 包：无 procedures，有 5 个常量", () => {
+  // ── Package: header-only 包（base_pkg，只有常量）──
+  describe("BASE_PKG (header-only)", () => {
+    itAst("识别为 header-only 包：无 procedures，有 5 个常量", () => {
       const pkg = result!.packages.find(p => p.name === "BASE_PKG")!
       expect(pkg.procedures).toHaveLength(0)
       expect(pkg.constants).toHaveLength(5)
       expect(pkg.bodyFile).toBeUndefined()
-      expect(pkg.specFile).toBeTruthy()
+      expect(pkg.headerFile).toBeTruthy()
     })
 
     itAst("常量抽取：name / type / value", () => {
@@ -170,7 +170,7 @@ describe("plsql-scanner AST 字段抽取 (tiny fixture)", () => {
     itAst("standalone 注入虚拟包 __STANDALONE_FN_ABC_CLASS__（含 lineRange/bodyFile）", () => {
       const pkg = result!.packages.find(p => p.name === "__STANDALONE_FN_ABC_CLASS__")
       expect(pkg).toBeTruthy()
-      expect(pkg!.specFile).toBeUndefined()
+      expect(pkg!.headerFile).toBeUndefined()
       expect(pkg!.bodyFile).toBeTruthy()
       expect(pkg!.procedures).toHaveLength(1)
       const proc = pkg!.procedures[0]

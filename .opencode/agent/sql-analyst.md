@@ -164,7 +164,7 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 
 - `inventory-packages/{PKG}.json` 的 `packageName` 与文件名一致（大小写不敏感）
 - `inventory.json` 的 `packageNames` 覆盖 inventory-index 中所有包
-- spec-only 包（无 procedures）也写入，`procedures: []`、`bodyFile: null`
+- header-only 包（无 procedures）也写入，`procedures: []`、`bodyFile: null`
 - direction 只用 `"IN"` / `"OUT"` / `"IN OUT"`
 - 表的 columns 标注 `isPrimaryKey` 和 `nullable`
 
@@ -179,7 +179,7 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 - [ ] `inventory-packages/` 下文件数 = inventory-index 包数
 - [ ] 每个 per-package 文件 packageName 与文件名一致
 - [ ] `inventory.json` 的 packageNames 覆盖 inventory-index 所有包
-- [ ] spec-only 包也写入
+- [ ] header-only 包也写入
 
 ---
 
@@ -192,8 +192,8 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 - **unit** = 一个根子程序（PROCEDURE，或孤儿 FUNCTION）+ 其 cargo FUNCTION（`dependency-graph.json.functionOwnership` 中 owner 等于本 unit id 的 FUNCTION，随 owner 一起处理）。本分片要处理的 unit 清单 = Runtime Context 的 `targetUnits`（形如 `PKG.refName`）。
 - `callGraph` / `translationOrder` / `procedureOrder` / `sccGroups` / `complexity` 读 `dependency-graph.json`，**不要自己计算**。`callGraph` 仅用于 FSD 板块 3 引用客观调用关系，**不是工作清单**——禁止遍历它生成 FSD。
 - **refName 规范**：非重载=裸名；重载=`{name}__{序号}`（1-based，全部带序号）。FSD 文件名、FSD 板块 3 目标子程序须用同一 refName。unit 模式下 refName 已由 inventory 算好（根 ref = `targetUnits` 里的 `PKG.refName`，cargo ref = `functionOwnership` 的 key `PKG.funcRef`），直接用，无需自己数重载。
-- `__STANDALONE_*__` 是独立存储过程的虚拟包，`specFile` 为空属正常（只有 body/源文件），切片已从源文件抽取，按正常 unit 流程处理。
-- **包级回退**（`dependency-graph.json` 无 `procedureOrder` 的旧 run）：Runtime Context 给 `targetPackages`（包级）而非 `targetUnits`，按整包处理——读该包 spec+body，写聚合 `analysis-packages/{pkg}.json`（`{packageName, subprograms}`，全包子程序）+ 全包子程序 FSD。此模式下 refName 需读整包按同名出现次数判断序号。
+- `__STANDALONE_*__` 是独立存储过程的虚拟包，`headerFile` 为空属正常（只有 body/源文件），切片已从源文件抽取，按正常 unit 流程处理。
+- **包级回退**（`dependency-graph.json` 无 `procedureOrder` 的旧 run）：Runtime Context 给 `targetPackages`（包级）而非 `targetUnits`，按整包处理——读该包 header+body，写聚合 `analysis-packages/{pkg}.json`（`{packageName, subprograms}`，全包子程序）+ 全包子程序 FSD。此模式下 refName 需读整包按同名出现次数判断序号。
 
 ### 切片字段（`shard-inputs/{PKG}/{unitRef}/`，引擎预切，取代整包文件）
 

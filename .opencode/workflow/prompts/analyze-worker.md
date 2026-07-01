@@ -34,7 +34,7 @@
 
 - ⛔ **你的完整任务已在本提示中**（由引擎注入系统提示）。**禁止 Read 任何 `.workOrder.md` 文件**——那是审计追溯用，不是你的输入；也禁止 Read `dispatch-logs/` 下任何文件。任务就在这里，直接执行。
 - ⛔ **只处理本分片 targetUnits 列出的 PROCEDURE 单元**，禁止处理/读源码/生成 FSD for 任何其他 unit（会有别的分片做，重复 = 产物冲突）。
-- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql`**（引擎已按 lineRange 预切本 unit 根 + cargo 的源码片段）。禁止 read 整个包 body/spec 文件、`inventory-packages/{pkg}.json`、`analysis-packages/{pkg}.json`。
+- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql`**（引擎已按 lineRange 预切本 unit 根 + cargo 的源码片段）。禁止 read 整个包 body/header 文件、`inventory-packages/{pkg}.json`、`analysis-packages/{pkg}.json`。
 - ⛔ `dependency-graph.json` / `inventory.json` 里列出的其他包/单元只是参考信息，**不是你的工作清单**。
 - refName 由 targetUnits（根 ref）+ `dependency-graph.json.functionOwnership`（cargo ref）给出，直接用作文件名，无需自己数重载。
 

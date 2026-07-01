@@ -9,7 +9,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync } from "node:fs"
-import { join, extname, relative } from "node:path"
+import { join, extname, relative, sep } from "node:path"
 import { ensureDeps, findOpencodeDir } from "./ensure-deps"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 import { getLogger } from "./workflow-logger"
@@ -52,7 +52,7 @@ export interface ConstantIndex {
 
 export interface PackageIndex {
   name: string
-  specFile?: string
+  headerFile?: string
   bodyFile?: string
   procedures: ProcedureIndex[]
   estimatedLoc: number
@@ -208,11 +208,11 @@ export async function ensureParser(): Promise<boolean> {
  * 使用 @griffithswaite/ts-plsql-parser 的 getParsedNodes 提取结构。
  * 逐文件解析，汇总结果。
  */
-export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
+export async function scanWithAST(roots: string[], primaryBase: string): Promise<InventoryIndex> {
   const { getParserFromInput, getParsedNodes } = await import("@griffithswaite/ts-plsql-parser")
   // 动态导入 antlr4 的 BailErrorStrategy，避免静态导入找不到模块的类型错误
   const antlr4 = await import("antlr4")
-  const files = collectSourceFiles(sourcePath)
+  const files = collectSourceFiles(roots)
   const packages = new Map<string, PackageIndex>()
   const tables: TableIndex[] = []
   const triggers: TriggerIndex[] = []
@@ -222,8 +222,8 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
   const callGraph: Record<string, string[]> = {}
 
   /**
-   * AST 解析一段脚本（spec / table / sequence / standalone-proc），结构写入累加器。
-   * 闭包捕获动态导入的 parser 工厂；可对合并文件切出的 spec 段单独调用。
+   * AST 解析一段脚本（header / table / sequence / standalone-proc），结构写入累加器。
+   * 闭包捕获动态导入的 parser 工厂；可对合并文件切出的 header 段单独调用。
    * lineRange 由 parser 的 token 位置给出，相对于传入的 segmentCode 起始行（1-based）。
    */
   const astParseScript = (segmentCode: string, segRelPath: string) => {
@@ -244,7 +244,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
         for (const child of unitNode.nodes) {
           switch (child.type) {
             case "Create_packageContext":
-              extractPackageSpec(child, packages, segRelPath)
+              extractPackageHeader(child, packages, segRelPath)
               break
             case "Create_package_bodyContext":
               extractPackageBody(child, packages, segRelPath, segmentCode)
@@ -275,24 +275,24 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
 
   for (const filePath of files) {
     const rawCode = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
-    const relPath = relative(sourcePath, filePath)
+    const relPath = storedFilePath(filePath, primaryBase)
     const ext = extname(filePath).toLowerCase()
     const code = stripSqlPlusCommands(rawCode)
 
     // 按文件类型路由：ts-plsql-parser 对含 SQL 体的构造（package body / trigger / view）
     // 解析极慢或抛错（FOR UPDATE OF / FORALL SAVE EXCEPTIONS 等 grammar 缺口），而 inventory
-    // 只需 spec 的签名 + DDL 结构，body 仅需 lineRange（regex 即可）。故：
-    //   spec / table / sequence / standalone-proc → AST（快、结构丰富）
-    //   body         → regex 取 lineRange（签名由 spec 提供）
+    // 只需 header 的签名 + DDL 结构，body 仅需 lineRange（regex 即可）。故：
+    //   header / table / sequence / standalone-proc → AST（快、结构丰富）
+    //   body         → regex 取 lineRange（签名由 header 提供）
     //   trigger/view → 文本提取（元数据在头部 / SELECT，不进 AST 体）
     //   type / dml   → 跳过（inventory 不建模对象类型 / DML）
     //
-    // spec+body 合并文件（pkg/<name>.sql 同时含包头与包体）：classifyFile 命中 "body"，
-    // 但其中 spec 段仍需走 AST 拿参数/类型/变量/常量。故在 body 分支内检测是否含 spec：
-    //   含 spec → 在首个 PACKAGE BODY 处切开。body 段先 regex 取 lineRange（相对 bodyCode，
-    //             按 spec 行数偏移到合并文件绝对行号）；spec 段再 AST 覆盖 procedures（保留
-    //             body 的 lineRange，补 params/types/vars/consts）。先 body 后 spec 与
-    //             "spec/body 分文件时 spec 后处理覆盖 body" 语义一致，body 私有过程被丢弃。
+    // header+body 合并文件（pkg/<name>.sql 同时含包头与包体）：classifyFile 命中 "body"，
+    // 但其中 header 段仍需走 AST 拿参数/类型/变量/常量。故在 body 分支内检测是否含 header：
+    //   含 header → 在首个 PACKAGE BODY 处切开。body 段先 regex 取 lineRange（相对 bodyCode，
+    //             按 header 行数偏移到合并文件绝对行号）；header 段再 AST 覆盖 procedures（保留
+    //             body 的 lineRange，补 params/types/vars/consts）。先 body 后 header 与
+    //             "header/body 分文件时 header 后处理覆盖 body" 语义一致，body 私有过程被丢弃。
     //   仅 body → 整文件 regex（原行为）。
     const kind = classifyFile(code)
     try {
@@ -303,7 +303,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
           const bodyStartIdx = bodyMatch?.index ?? 0
           // body 起始的 1-based 行号；lineOffset = body 之前的行数，把 bodyCode 相对行号偏移到合并文件绝对行号
           const lineOffset = code.slice(0, bodyStartIdx).split("\n").length - 1
-          const { specCode, bodyCode } = splitPackageSpecAndBody(code)
+          const { headerCode, bodyCode } = splitPackageHeaderAndBody(code)
           const beforeNames = new Set(packages.keys())
           if (bodyCode.trim()) {
             regexFallbackForFile(bodyCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
@@ -318,13 +318,13 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
               }
             }
           }
-          if (specCode.trim()) {
+          if (headerCode.trim()) {
             try {
-              astParseScript(specCode, relPath)
+              astParseScript(headerCode, relPath)
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e)
-              getLogger().warn("[plsql-scanner]", `AST 解析 spec 段失败，降级到 regex: ${relPath} — ${errMsg}`)
-              regexFallbackForFile(specCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+              getLogger().warn("[plsql-scanner]", `AST 解析 header 段失败，降级到 regex: ${relPath} — ${errMsg}`)
+              regexFallbackForFile(headerCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
             }
           }
         } else {
@@ -341,7 +341,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
         // 跳过结构抽取；仍抽取调用关系（CREATE TYPE BODY / DML 中可能有调用）
         extractCallGraph(code, relPath, callGraph)
       } else {
-        // AST：spec / table / sequence / standalone-proc
+        // AST：header / table / sequence / standalone-proc
         astParseScript(code, relPath)
         extractCallGraph(code, relPath, callGraph)
       }
@@ -356,7 +356,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
   const pkgList = Array.from(packages.values())
   injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
   return {
-    sourcePath,
+    sourcePath: primaryBase,
     scannedAt: new Date().toISOString(),
     scannerUsed: "ast",
     packages: pkgList,
@@ -508,7 +508,7 @@ function extractParams(node: ParsedNode): ParamIndex[] {
     .filter((p): p is ParamIndex => p !== null)
 }
 
-/** 从 Function spec/body 节点提取返回类型（RETURN 后的第一个 Type_spec） */
+/** 从 Function header/body 节点提取返回类型（RETURN 后的第一个 Type_spec） */
 function extractReturnType(funcNode: ParsedNode): string | null {
   const children = funcNode.nodes || []
   let seenReturn = false
@@ -522,8 +522,8 @@ function extractReturnType(funcNode: ParsedNode): string | null {
   return null
 }
 
-/** 提取 Package spec */
-function extractPackageSpec(
+/** 提取 Package header */
+function extractPackageHeader(
   node: ParsedNode,
   packages: Map<string, PackageIndex>,
   relPath: string,
@@ -533,19 +533,19 @@ function extractPackageSpec(
 
   const existing = packages.get(pkgName) ?? {
     name: pkgName,
-    specFile: undefined,
+    headerFile: undefined,
     bodyFile: undefined,
     procedures: [],
     estimatedLoc: 0,
   }
-  existing.specFile = relPath
+  existing.headerFile = relPath
   existing.estimatedLoc += (node.text || "").split("\n").length
 
   // 提取 procedures 和 functions（含参数 / 返回类型 / loc）。
-  // spec 是声明的权威来源（含重载多版本、参数签名）；以 spec 重建 procedures 列表，
-  // 同时保留 body 可能已写入的 lineRange（实现行号范围，比 spec 声明行更精确）。
-  // 按名匹配 body 已有条目（重载按首条 best-effort），避免 body/spec 顺序导致的重复。
-  const specProcs: ProcedureIndex[] = []
+  // header 是声明的权威来源（含重载多版本、参数签名）；以 header 重建 procedures 列表，
+  // 同时保留 body 可能已写入的 lineRange（实现行号范围，比 header 声明行更精确）。
+  // 按名匹配 body 已有条目（重载按首条 best-effort），避免 body/header 顺序导致的重复。
+  const headerProcs: ProcedureIndex[] = []
   for (const child of node.nodes) {
     if (child.type !== "Package_obj_specContext") continue
     for (const obj of child.nodes) {
@@ -556,10 +556,10 @@ function extractPackageSpec(
       if (!procName) continue
       const startLine = parseLine(obj.start)
       const endLine = parseLine(obj.stop)
-      const specRange = startLine && endLine ? [startLine, endLine] as [number, number] : undefined
+      const headerRange = startLine && endLine ? [startLine, endLine] as [number, number] : undefined
       const bodyMatch = existing.procedures.find(p => p.name === procName.toLowerCase())
-      const lineRange = bodyMatch?.lineRange ?? specRange
-      specProcs.push({
+      const lineRange = bodyMatch?.lineRange ?? headerRange
+      headerProcs.push({
         name: procName.toLowerCase(),
         type: isFunc ? "function" : "procedure",
         lineRange,
@@ -569,7 +569,7 @@ function extractPackageSpec(
       })
     }
   }
-  existing.procedures = specProcs
+  existing.procedures = headerProcs
 
   // 提取 package 级 types / variables / constants
   existing.types = extractTypeDeclarations(node)
@@ -592,7 +592,7 @@ function extractPackageBody(
 
   const existing = packages.get(pkgName) ?? {
     name: pkgName,
-    specFile: undefined,
+    headerFile: undefined,
     bodyFile: undefined,
     procedures: [],
     estimatedLoc: 0,
@@ -608,7 +608,7 @@ function extractPackageBody(
           const procName = findIdentifierText(obj)
           const procType = obj.type === "Procedure_bodyContext" ? "procedure" : "function"
           if (procName) {
-            // 检查是否已存在（spec 中已声明）
+            // 检查是否已存在（header 中已声明）
             const existing2 = existing.procedures.find(p => p.name === procName.toLowerCase())
             const startLine = parseLine(obj.start)
             const endLine = parseLine(obj.stop)
@@ -619,12 +619,12 @@ function extractPackageBody(
                 existing2.lineRange = lineRange
                 existing2.loc = lineRange[1] - lineRange[0] + 1
               }
-              // spec 缺参数时用 body 补（body 签名最完整）
+              // header 缺参数时用 body 补（body 签名最完整）
               if ((!existing2.params || existing2.params.length === 0)) {
                 existing2.params = extractParams(obj)
               }
             } else {
-              // body-only procedure（可能没有在 spec 中声明）
+              // body-only procedure（可能没有在 header 中声明）
               existing.procedures.push({
                 name: procName.toLowerCase(),
                 type: procType,
@@ -864,31 +864,31 @@ function extractSequence(node: ParsedNode, sequences: SequenceIndex[], relPath: 
 
 /**
  * 按文件内容（cheap regex）分类，决定走 AST 还是文本/regex。
- * 顺序敏感：body / trigger / view / type 先判，再 spec，最后通用 CREATE。
+ * 顺序敏感：body / trigger / view / type 先判，再 header，最后通用 CREATE。
  * 注意：单文件混合多种 DDL 时，首个命中的慢类型胜出（其余被跳过）——
  * 建议项目按类型分文件存放（与 fixture 的 pkg/ schema/ trigger/ 目录约定一致）。
  */
-function classifyFile(code: string): "body" | "trigger" | "view" | "type" | "spec" | "create" | "dml" {
+function classifyFile(code: string): "body" | "trigger" | "view" | "type" | "header" | "create" | "dml" {
   if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i.test(code)) return "body"
   if (/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b/i.test(code)) return "trigger"
   if (/CREATE\s+(OR\s+REPLACE\s+)?VIEW\b/i.test(code)) return "view"
   if (/CREATE\s+(OR\s+REPLACE\s+)?TYPE\b/i.test(code)) return "type"
-  if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b/i.test(code)) return "spec"
+  if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b/i.test(code)) return "header"
   if (/\bCREATE\b/i.test(code)) return "create" // table / sequence / standalone proc/func
   return "dml" // 纯 DML / 匿名块 / SQL*Plus 脚本
 }
 
 /**
- * 拆分 spec+body 合并文件：在首个 PACKAGE BODY 声明处切开。
- * 返回 { specCode: body 之前的部分（含包头 spec 及其它 DDL）, bodyCode: 从首个 PACKAGE BODY 到末尾 }。
- * 无 PACKAGE BODY 时 bodyCode 为空串（spec-only 或非包文件）。
- * 约定：合并文件中 spec 在 body 之前（与 pkg/<name>.sql 的"先包头后包体"顺序一致）；
- *       单文件多包交错（spec1/body1/spec2/body2）不支持——项目按一包一文件组织。
+ * 拆分 header+body 合并文件：在首个 PACKAGE BODY 声明处切开。
+ * 返回 { headerCode: body 之前的部分（含包头 header 及其它 DDL）, bodyCode: 从首个 PACKAGE BODY 到末尾 }。
+ * 无 PACKAGE BODY 时 bodyCode 为空串（header-only 或非包文件）。
+ * 约定：合并文件中 header 在 body 之前（与 pkg/<name>.sql 的"先包头后包体"顺序一致）；
+ *       单文件多包交错（header1/body1/header2/body2）不支持——项目按一包一文件组织。
  */
-function splitPackageSpecAndBody(code: string): { specCode: string; bodyCode: string } {
+function splitPackageHeaderAndBody(code: string): { headerCode: string; bodyCode: string } {
   const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i)
-  if (!m || m.index === undefined) return { specCode: code, bodyCode: "" }
-  return { specCode: code.slice(0, m.index), bodyCode: code.slice(m.index) }
+  if (!m || m.index === undefined) return { headerCode: code, bodyCode: "" }
+  return { headerCode: code.slice(0, m.index), bodyCode: code.slice(m.index) }
 }
 
 /** 计算子串在全文中的起止行号（1-based） */
@@ -995,8 +995,8 @@ function extractCallGraph(
 
 // ── Regex 降级扫描 ──────────────────────────────────────────────────────────────
 
-export function scanWithRegex(sourcePath: string): InventoryIndex {
-  const files = collectSourceFiles(sourcePath)
+export function scanWithRegex(roots: string[], primaryBase: string): InventoryIndex {
+  const files = collectSourceFiles(roots)
   const packages = new Map<string, PackageIndex>()
   const tables: TableIndex[] = []
   const triggers: TriggerIndex[] = []
@@ -1007,7 +1007,7 @@ export function scanWithRegex(sourcePath: string): InventoryIndex {
 
   for (const filePath of files) {
     const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
-    const relPath = relative(sourcePath, filePath)
+    const relPath = storedFilePath(filePath, primaryBase)
     const ext = extname(filePath).toLowerCase()
 
     regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
@@ -1016,7 +1016,7 @@ export function scanWithRegex(sourcePath: string): InventoryIndex {
   const pkgList = Array.from(packages.values())
   injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
   return {
-    sourcePath,
+    sourcePath: primaryBase,
     scannedAt: new Date().toISOString(),
     scannerUsed: "regex",
     packages: pkgList,
@@ -1047,17 +1047,17 @@ function regexFallbackForFile(
   const lines = code.split("\n")
 
   if (ext === ".pks") {
-    // Package spec
+    // Package header
     const pkgName = regexExtract(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(\w+)/i, code, 2)
     if (pkgName) {
       const existing = packages.get(pkgName.toUpperCase()) ?? {
         name: pkgName.toUpperCase(),
-        specFile: undefined,
+        headerFile: undefined,
         bodyFile: undefined,
         procedures: [],
         estimatedLoc: 0,
       }
-      existing.specFile = relPath
+      existing.headerFile = relPath
       existing.estimatedLoc += lines.length
 
       // 提取 procedure/function 声明
@@ -1070,7 +1070,7 @@ function regexFallbackForFile(
     if (pkgName) {
       const existing = packages.get(pkgName.toUpperCase()) ?? {
         name: pkgName.toUpperCase(),
-        specFile: undefined,
+        headerFile: undefined,
         bodyFile: undefined,
         procedures: [],
         estimatedLoc: 0,
@@ -1108,17 +1108,17 @@ function regexFallbackForFile(
     // Standalone procedure/function（含 lineRange，复用 BEGIN/END 栈；一个 .sql 可定义多个）
     regexExtractStandaloneProcs(code, relPath, standaloneProcedures)
 
-    // .sql 文件也可能是 package spec/body（某些项目规范）
+    // .sql 文件也可能是 package header/body（某些项目规范）
     for (const pkgSpecMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\s+)(\w+)/gi)) {
       const name = pkgSpecMatch[2].toUpperCase()
       const existing = packages.get(name) ?? {
         name,
-        specFile: undefined,
+        headerFile: undefined,
         bodyFile: undefined,
         procedures: [],
         estimatedLoc: 0,
       }
-      existing.specFile = relPath
+      existing.headerFile = relPath
       existing.estimatedLoc += lines.length
       regexExtractProcedures(lines, existing)
       packages.set(name, existing)
@@ -1127,7 +1127,7 @@ function regexFallbackForFile(
       const name = pkgBodyMatch[2].toUpperCase()
       const existing = packages.get(name) ?? {
         name,
-        specFile: undefined,
+        headerFile: undefined,
         bodyFile: undefined,
         procedures: [],
         estimatedLoc: 0,
@@ -1149,7 +1149,7 @@ function regexExtract(pattern: RegExp, text: string, group: number): string | nu
   return m?.[group] ?? null
 }
 
-/** 从 spec 文件提取 procedure/function 声明（不重复添加已存在的） */
+/** 从 header 文件提取 procedure/function 声明（不重复添加已存在的） */
 function regexExtractProcedures(lines: string[], pkg: PackageIndex): void {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
@@ -1389,7 +1389,7 @@ function injectStandaloneVirtualPackages(
     const loc = lineRange ? lineRange[1] - lineRange[0] + 1 : 0
     packages.push({
       name: vname,
-      specFile: undefined,
+      headerFile: undefined,
       bodyFile: s.sourceFile,
       procedures: [{
         name: s.name,
@@ -1411,12 +1411,21 @@ function injectStandaloneVirtualPackages(
 
 // ── 文件收集 ────────────────────────────────────────────────────────────────────
 
-/** 收集目录下所有 PL/SQL 相关文件（.pks 在 .pkb 前，确保 spec 先处理） */
-function collectSourceFiles(sourcePath: string): string[] {
-  const extensions = new Set(VALID_SOURCE_EXTENSIONS)
-  const files: string[] = []
+/**
+ * 计算存入 headerFile/bodyFile 的路径：filePath 在 primaryBase 下则存相对路径（可移植），
+ * 否则存绝对路径（双目录模式下 body 不在 headerPath 下）。下游 readSource/absSrc 已兼容绝对路径。
+ */
+function storedFilePath(filePath: string, primaryBase: string): string {
+  return filePath.startsWith(primaryBase + sep) ? relative(primaryBase, filePath) : filePath
+}
 
-  function walk(dir: string): void {
+/** 收集多个根目录下所有 PL/SQL 相关文件。以 root 顺序为主排序键（headerPath 整批先于 bodyPath），
+ *  root 内部再按 .pks→.pkb→名（确保 header 先处理，body-only 私有过程不被覆盖丢失）。 */
+function collectSourceFiles(roots: string[]): string[] {
+  const extensions = new Set(VALID_SOURCE_EXTENSIONS)
+  const tagged: { rootIdx: number; path: string }[] = []
+
+  function walk(dir: string, rootIdx: number): void {
     const entries = readdirSync(dir, { withFileTypes: true })
     for (const entry of entries) {
       const fullPath = join(dir, entry.name)
@@ -1426,43 +1435,62 @@ function collectSourceFiles(sourcePath: string): string[] {
       if (entry.name === GENERATED_OUTPUT_DIR && entry.isDirectory()
           && existsSync(join(fullPath, GENERATED_MARKER))) continue
       if (entry.isDirectory()) {
-        walk(fullPath)
+        walk(fullPath, rootIdx)
       } else if (entry.isFile() && extensions.has(extname(entry.name).toLowerCase())) {
-        files.push(fullPath)
+        tagged.push({ rootIdx, path: fullPath })
       }
     }
   }
 
-  if (!existsSync(sourcePath)) {
-    throw new Error(`Source path does not exist: ${sourcePath}`)
-  }
-  walk(sourcePath)
-  // .pks 在 .pkb 前：spec 先处理，body 后续更新行号
-  return files.sort((a, b) => {
-    const extA = extname(a).toLowerCase()
-    const extB = extname(b).toLowerCase()
+  roots.forEach((root, idx) => {
+    if (!existsSync(root)) throw new Error(`Source path does not exist: ${root}`)
+    walk(root, idx)
+  })
+  // root 顺序为主键（header 整批在前）；root 内 .pks 在 .pkb 前确保 header 先处理
+  return tagged.sort((a, b) => {
+    if (a.rootIdx !== b.rootIdx) return a.rootIdx - b.rootIdx
+    const extA = extname(a.path).toLowerCase()
+    const extB = extname(b.path).toLowerCase()
     if (extA === ".pks" && extB === ".pkb") return -1
     if (extA === ".pkb" && extB === ".pks") return 1
-    return a.localeCompare(b)
-  })
+    return a.path.localeCompare(b.path)
+  }).map(t => t.path)
 }
 
 // ── 主入口 ──────────────────────────────────────────────────────────────────────
 
+export type ScanSourceOpts = { sourcePath?: string; headerPath?: string; bodyPath?: string }
+
 /**
  * 扫描 PL/SQL 源码目录，返回 inventory index。
  * 自动检测/安装 parser，失败则降级到 regex。
+ *
+ * 入参支持两种模式（向后兼容 string 入参）：
+ * - 单目录：scanSource(sourcePath) 或 scanSource({ sourcePath }) —— header/body 同根
+ * - 双目录：scanSource({ headerPath, bodyPath }) —— headerPath 先于 bodyPath 处理，
+ *   保住 body-only 私有过程；body 文件存绝对路径（不在 headerPath 下）。
  */
-export async function scanSource(sourcePath: string): Promise<InventoryIndex> {
+export async function scanSource(sourceOrOpts: string | ScanSourceOpts): Promise<InventoryIndex> {
+  const opts = typeof sourceOrOpts === "string" ? { sourcePath: sourceOrOpts } : sourceOrOpts
+  const { sourcePath, headerPath, bodyPath } = opts
+  // 双目录模式：headerPath 先于 bodyPath；primaryBase = headerPath（body 存绝对路径）
+  // 单目录模式：roots = [sourcePath]，primaryBase = sourcePath（全相对，与现状一致）
+  const twoDir = !!(headerPath && bodyPath)
+  const primaryBase = twoDir ? headerPath! : (sourcePath ?? headerPath ?? bodyPath)
+  if (!primaryBase) {
+    throw new Error("scanSource 需要 sourcePath 或 (headerPath + bodyPath)")
+  }
+  const roots = twoDir ? [headerPath!, bodyPath!] : [primaryBase]
+
   const hasParser = await ensureParser()
   if (hasParser) {
     try {
-      return await scanWithAST(sourcePath)
+      return await scanWithAST(roots, primaryBase)
     } catch (e) {
       // AST 扫描整体失败，降级到 regex
       getLogger().error("[plsql-scanner]", `AST scan failed, falling back to regex: ${e}`)
-      return scanWithRegex(sourcePath)
+      return scanWithRegex(roots, primaryBase)
     }
   }
-  return scanWithRegex(sourcePath)
+  return scanWithRegex(roots, primaryBase)
 }

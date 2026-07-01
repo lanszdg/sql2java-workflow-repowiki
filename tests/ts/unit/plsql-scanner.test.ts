@@ -17,7 +17,7 @@ describe("plsql-scanner", () => {
   describe("scanWithRegex", () => {
     it("扫描 tiny fixture，检测所有 package", () => {
       // TODO: 补充具体断言 — 预期有哪些 package
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(result.scannerUsed).toBe("regex")
       expect(result.packages.length).toBeGreaterThan(0)
       expect(result.sourcePath).toBe(FIXTURE_TINY)
@@ -25,30 +25,30 @@ describe("plsql-scanner", () => {
 
     it("检测所有 table", () => {
       // TODO: 补充具体断言 — 预期有哪些 table
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(result.tables.length).toBeGreaterThan(0)
     })
 
     it("检测 trigger", () => {
       // TODO: 补充具体断言
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(result.triggers.length).toBeGreaterThanOrEqual(0)
     })
 
     it("检测 sequence", () => {
       // TODO: 补充具体断言
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(result.sequences.length).toBeGreaterThanOrEqual(0)
     })
 
     it("检测 view", () => {
       // TODO: 补充具体断言
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(result.views.length).toBeGreaterThanOrEqual(0)
     })
 
     it("package procedure 的行范围有效", () => {
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       for (const pkg of result.packages) {
         for (const proc of pkg.procedures) {
           if (proc.lineRange) {
@@ -67,11 +67,11 @@ describe("plsql-scanner", () => {
     })
 
     it("不存在的路径抛错", () => {
-      expect(() => scanWithRegex("/nonexistent/path")).toThrow()
+      expect(() => scanWithRegex(["/nonexistent/path"], "/nonexistent/path")).toThrow()
     })
 
     it("scannedAt 是有效 ISO 时间", () => {
-      const result = scanWithRegex(FIXTURE_TINY)
+      const result = scanWithRegex([FIXTURE_TINY], FIXTURE_TINY)
       expect(new Date(result.scannedAt).getTime()).not.toBeNaN()
     })
   })

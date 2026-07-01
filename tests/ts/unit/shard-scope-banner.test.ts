@@ -37,7 +37,7 @@ describe("buildShardScopeBanner", () => {
     expect(banner).toContain('PROCEDURE 单元 ["CORE_PKG.get_bom_components"]')
     expect(banner).toContain("分片 5/13")
     expect(banner).toContain("shard-inputs/{pkg}/{ref}/")
-    expect(banner).toContain("禁止 read 整包 body/spec")
+    expect(banner).toContain("禁止 read 整包 body/header")
     // 显式声明忽略任务提示的全量措辞
     expect(banner).toContain("任务提示")
     expect(banner).toContain("一律忽略")

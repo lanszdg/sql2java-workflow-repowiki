@@ -71,7 +71,7 @@ describe("buildInventoryFromIndex", () => {
     expect(getItem.params[0]).toEqual({ name: "p_id", oracleType: "NUMBER", direction: "IN" })
   })
 
-  it("BASE_PKG 逐包文件：spec-only，5 常量、0 procedure", () => {
+  it("BASE_PKG 逐包文件：header-only，5 常量、0 procedure", () => {
     const base = JSON.parse(readFileSync(join(dir, "inventory-packages", "BASE_PKG.json"), "utf-8"))
     expect(base.procedures).toHaveLength(0)
     expect(base.constants).toHaveLength(5)
