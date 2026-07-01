@@ -142,7 +142,9 @@ permission:
   - **arrange**：构造输入 Bean，设置 Mock 返回值（`when(...).thenReturn(...)`，mock Mapper/Builder/Validator 依赖）
   - **act**：调用被测 Aggregate 方法
   - **assert**：验证返回值（`assertEquals`、`assertNotNull`）和副作用（`verify(mapper).insert(...)`）；异常路径用 `assertThrows(TranFailException.class, ...)` 验证校验失败抛异常
+  - **方法签名**：Aggregate 业务方法声明 `throws TranFailException`（checked 异常），凡调用此类方法的测试方法（含 happy path 直接调用 act 的）**方法签名必须声明 `throws TranFailException`**（或 `throws Exception`），否则编译报 `unreported exception`。用 `assertThrows` 包裹的异常路径方法可不声明（异常被 lambda 捕获），但声明亦无害
 - 每个方法至少生成 happy path 测试；中/高复杂度方法额外生成 1-2 个异常路径测试
+- **覆盖率目标**（verify 阶段 jacoco 校验）：行覆盖 ≥ 90% / 分支覆盖 ≥ 75%。为达成目标，除 happy path 外，**每个 if/else 分支的两支都要有用例覆盖**（边界值、异常输入、null 输入、procStat="0" 错误码路径）；catch 分支用 `assertThrows` 触发。不达标会进 fix 回环，未覆盖行清单会回灌给你增量补测
 - 测试方法命名：`methodName_scenario_expectedBehavior`
 - 所有注释使用中文
 - **禁止**生成空方法体或 `// TODO: implement test`
@@ -340,6 +342,20 @@ per-unit 文件字段：
 - 缺少 Mapper XML statement 对应的测试方法 → 补充生成
 - `schema-h2.sql` 修复时采用"追加"策略，只追加缺失的表定义，不修改已有的表定义
 
+#### Step 2.5: 覆盖率补测（verify 触发时）
+
+verify 触发的 fix（workOrder 含 `## 未覆盖行清单` 段）需按 jacoco 未覆盖点增量补测试：
+
+1. **读清单**：workOrder「## 未覆盖行清单」段列出 `{ package, class, line, type }`，每项是 jacoco 解析出的未覆盖点；同时可读 `${artifactsDir}/coverage-gaps.md` 看完整报告（含未纳入统计的范围说明）
+2. **按 class:line 定位**：`class` 是全限定 Java 类名（如 `com.example.ordersystem.order.domain.aggregate.OrderAggregate`），`line` 是该类源码行号；`read` 该类文件，找到 line 对应的方法
+3. **补测试**（在对应的 `*Test.java` 中 edit 追加测试方法，勿覆盖已有测试）：
+   - `type=line`（行未覆盖）：补对应方法的正向用例，arrange 构造输入 + mock 依赖返回值，act 调用，assert 返回值/副作用
+   - `type=branch`（分支未覆盖）：补缺失的 if/else 一支——边界值、异常输入、null、错误码路径，用 `assertThrows(TranFailException.class, ...)` 验证异常路径
+4. **不计入项**：`@Disabled` 的 Mapper 集成测试路径（H2 不兼容）不计入覆盖率，无需补；被 pom excludes 排除的类（common/infrastructure、beans/*Bean、*Config、*Application）也不计入
+5. 补完更新受影响 unit 的 per-unit 文件 `files[]`（新增测试方法无需改文件列表，除非新建测试文件）
+
+修完覆盖率补测后，继续 Step 3。
+
 #### Step 3: 写入 fix.json
 
 完成所有修复后，写入 `${artifactsDir}/fix.json`：
@@ -364,7 +380,8 @@ per-unit 文件字段：
 
 - [ ] 每个语义 mustFix 项都有对应修复
 - [ ] review 触发时：每个静态 finding（review-static.json）都有对应修复
-- [ ] fix.json 的 fixedPackages 覆盖所有失败包（passed=false 或 staticPassed=false）
+- [ ] verify 触发时：workOrder「## 未覆盖行清单」的每项（class:line）都有对应补测（行补正向用例、分支补缺失 if/else 一支）
+- [ ] fix.json 的 fixedPackages 覆盖所有失败包（passed=false 或 staticPassed=false 或覆盖率不达标包）
 - [ ] fixedPackages 使用 inventory 中的 Oracle 原始包名
 - [ ] 修复遵循五原则，不引入新重构
 - [ ] unit 模式下受影响 unit 的 per-unit 文件已更新（聚合 translation.json 由 engine re-merge，不手写）

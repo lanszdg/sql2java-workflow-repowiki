@@ -236,7 +236,9 @@ workflow({ action: "generateReviewSummary", runId: "<runId>" })
 
 ### 目标
 
-全局编译验证 + 按包 MyBatis XML 校验 + 编译错误归因 + 单元测试执行。产出 per-package verify.json 和顶层 verify-summary.json。
+全局编译验证 + 按包 MyBatis XML 校验 + 编译错误归因 + 单元测试执行 + JaCoCo 覆盖率门禁。产出 verify-compile.log / verify-test.log / verify-summary.json / coverage-gaps.md。
+
+覆盖率门禁：行覆盖 ≥ 90% 且分支覆盖 ≥ 75%（范围限业务核心，pom excludes 已排除 common/infrastructure/beans*Bean/*Config/*Application）。不达标 → `allPassed=false` → fix 回环增量补测，未覆盖行清单会注入 fix workOrder。通过率（测试全绿）与覆盖率双门禁，任一不达标即 failed。
 
 ### 输入
 
@@ -254,14 +256,16 @@ workflow({ action: "generateReviewSummary", runId: "<runId>" })
 
 ### 工作步骤
 
-#### Step 1: 编译 + 测试（输出写日志）
+#### Step 1: 编译 + 测试 + 覆盖率（输出写日志）
 
-在 `${projectRoot}` 目录下依次运行 `mvn compile` 和 `mvn test`，各自把**完整输出（含 stderr）**写入对应日志：
+在 `${projectRoot}` 目录下依次运行 `mvn compile` 和 `mvn test jacoco:report`，各自把**完整输出（含 stderr）**写入对应日志：
 
 - `mvn compile` → `${artifactsDir}/verify-compile.log`
-- `mvn test` → `${artifactsDir}/verify-test.log`
+- `mvn test jacoco:report` → `${artifactsDir}/verify-test.log`
 
-用你当前运行时原生的 shell 重定向即可（bash/cmd：`cd ${projectRoot} && mvn compile > ${artifactsDir}/verify-compile.log 2>&1`；PowerShell：`cd ${projectRoot}; mvn compile 2>&1 | Out-File ${artifactsDir}/verify-compile.log`）。先确认 mvn/java 可用；任一不可用则跳过本步（不要安装），日志留空，直接进 Step 2。不要手工解析 mvn 输出——由 `generateVerifySummary` 解析。
+`mvn test` 跑 Surefire 产生测试通过率；`jacoco:report` 生成覆盖率 XML 报告到 `${projectRoot}/target/site/jacoco/jacoco.xml`（scaffold pom 已配 jacoco-maven-plugin，prepare-agent 挂 agent、report 生成报告）。两者都跑——**通过率与覆盖率双门禁**，由 `generateVerifySummary` 一并解析。
+
+用你当前运行时原生的 shell 重定向即可（bash/cmd：`cd ${projectRoot} && mvn compile > ${artifactsDir}/verify-compile.log 2>&1`；PowerShell：`cd ${projectRoot}; mvn compile 2>&1 | Out-File ${artifactsDir}/verify-compile.log`）。先确认 mvn/java 可用；任一不可用则跳过本步（不要安装），日志留空，直接进 Step 2。不要手工解析 mvn 输出或 jacoco.xml——由 `generateVerifySummary` 解析。
 
 #### Step 2: 调用 generateVerifySummary
 
@@ -278,6 +282,7 @@ workflow({ action: "generateVerifySummary", runId: "<runId>" })
 ### 质量检查
 
 - [ ] mvn/java 可用性已确认
-- [ ] 环境可用时：`mvn compile` / `mvn test` 已运行，完整输出（含 stderr）写入对应日志
+- [ ] 环境可用时：`mvn compile` / `mvn test jacoco:report` 已运行，完整输出（含 stderr）写入对应日志
+- [ ] 环境可用时：`target/site/jacoco/jacoco.xml` 已生成（覆盖率报告）
 - [ ] 环境不可用时：跳过 mvn，直接调 generateVerifySummary
-- [ ] 已调用 `generateVerifySummary` 生成 verify-summary.json（不要手写、不要手工解析 mvn 输出）
+- [ ] 已调用 `generateVerifySummary` 生成 verify-summary.json（不要手写、不要手工解析 mvn 输出）+ coverage-gaps.md（覆盖率报告，代码自动生成）

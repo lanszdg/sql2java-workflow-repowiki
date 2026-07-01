@@ -746,12 +746,42 @@ export const VerifySummarySchema = z.object({
     packageName: z.string(),
     issue: z.string(),
   })).optional(),
+  // JaCoCo 覆盖率结果（verify 阶段解析 jacoco.xml 产出）。环境不可用时 executed=false，
+  // passed 置 true 不阻断（与 mvn 不可用跳过语义一致）。
+  coverage: z.object({
+    /** jacoco.xml 是否成功解析到 */
+    executed: z.boolean(),
+    /** 未解析原因（executed=false 时使用，如环境不可用/无 jacoco.xml） */
+    skipReason: z.string().optional(),
+    lineRate: z.coerce.number().nullable().optional(),
+    branchRate: z.coerce.number().nullable().optional(),
+    lineThreshold: z.coerce.number(),
+    branchThreshold: z.coerce.number(),
+    /** 覆盖率是否达标（executed=false 时为 true，不阻断） */
+    passed: z.boolean(),
+    /** 每包覆盖率明细 + 未覆盖 gaps（供 fix 注入「未覆盖行清单」段） */
+    packageCoverage: z.array(z.object({
+      packageName: z.string(),
+      lineRate: z.coerce.number().nullable().optional(),
+      branchRate: z.coerce.number().nullable().optional(),
+      passed: z.boolean(),
+      gaps: z.array(z.object({
+        className: z.string(),
+        line: z.coerce.number().nullable().optional(),
+        type: z.enum(["line", "branch"]),
+      })).optional(),
+    })),
+  }),
 }).passthrough().refine(
   allPassedRefine.check,
   { message: allPassedRefine.message }
 ).refine(
   data => data.compilation.success === true || data.compilation.skipped === true || data.compilation.errors !== undefined,
   { message: "compilation.success=false 时 errors 必须存在（允许空数组），除非 skipped=true" }
+).refine(
+  // 单向蕴含：覆盖率未达标时 allPassed 必须为 false（覆盖率达标时 allPassed 由编译/测试/包归因决定，可真可假）
+  data => data.coverage.passed === true || data.allPassed === false,
+  { message: "覆盖率未达标时 allPassed 必须为 false" }
 )
 
 // ============================================================================

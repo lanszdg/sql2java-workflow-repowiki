@@ -239,6 +239,14 @@ export function makeVerifySummary(overrides: Record<string, unknown> = {}) {
       testFiles: ["src/test/java/com/example/item/ItemServiceTest.java"],
     },
     totalTodosRemaining: 0,
+    // coverage 为必填（VerifySummarySchema）；默认跳过（executed=false, passed=true 不阻断）
+    coverage: {
+      executed: false,
+      passed: true,
+      lineThreshold: 0.9,
+      branchThreshold: 0.75,
+      packageCoverage: [],
+    },
     ...overrides,
   }
 }

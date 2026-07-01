@@ -15,3 +15,12 @@ export const GENERATED_MARKER_ID = "sql2java-schema-fetcher"
 
 /** PL/SQL 源文件有效扩展名（小写，含前导点） */
 export const VALID_SOURCE_EXTENSIONS: readonly string[] = [".sql", ".pks", ".pkb", ".pls"]
+
+// ── JaCoCo 覆盖率门禁阈值（verify 阶段解析 jacoco.xml 后判定） ──
+// 起步阈值：行 90% / 分支 75%。范围由 scaffold pom 的 <excludes> 收窄到业务核心
+// （排除 common/infrastructure、beans/*Bean、*Config、*Application）。不达标走 fix 回环增量补测；
+// 实测过紧时调这两个常量即可，无需改其他代码。
+/** 行覆盖率阈值（0-1） */
+export const COVERAGE_LINE_THRESHOLD = 0.9
+/** 分支覆盖率阈值（0-1） */
+export const COVERAGE_BRANCH_THRESHOLD = 0.75

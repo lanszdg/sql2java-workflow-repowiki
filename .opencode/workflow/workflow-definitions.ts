@@ -92,7 +92,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       description: "修复审查/验证发现的问题",
       agentFile: "agent/translator.md",
       temperature: 0.1,
-      maxRetries: 3,
+      maxRetries: 5,
       isFixPhase: true,
       tools: ["read", "bash", "write", "edit", "workflow"],
     },

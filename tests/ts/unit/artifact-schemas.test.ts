@@ -269,6 +269,7 @@ describe("Schema 有效数据通过校验", () => {
       packageResults: [{ packageName: "CORE_PKG", passed: true, mybatisValid: true }],
       testExecution: { executed: true, testFiles: ["ItemServiceTest.java"] },
       totalTodosRemaining: 0,
+      coverage: { executed: false, passed: true, lineThreshold: 0.9, branchThreshold: 0.75, packageCoverage: [] },
     }
     expect(VerifySummarySchema.safeParse(data).success).toBe(true)
   })
@@ -283,6 +284,7 @@ describe("Schema 有效数据通过校验", () => {
       packageResults: [{ packageName: "CORE_PKG", passed: false, mybatisValid: false }],
       testExecution: { executed: false, testFiles: [] },
       totalTodosRemaining: 1,
+      coverage: { executed: false, passed: true, lineThreshold: 0.9, branchThreshold: 0.75, packageCoverage: [] },
     }
     expect(VerifySummarySchema.safeParse(data).success).toBe(true)
   })
@@ -401,6 +403,7 @@ describe("Schema 无效数据被拒绝", () => {
       packageResults: [{ packageName: "CORE_PKG", passed: false, mybatisValid: false }],
       testExecution: { executed: false, testFiles: [] },
       totalTodosRemaining: 1,
+      coverage: { executed: false, passed: true, lineThreshold: 0.9, branchThreshold: 0.75, packageCoverage: [] },
     }
     const result = VerifySummarySchema.safeParse(data)
     expect(result.success).toBe(true)
@@ -612,6 +615,7 @@ describe("类型放松 — 合理 LLM 变体不再被拒", () => {
       packageResults: [{ packageName: "X", passed: false, mybatisValid: false }],
       testExecution: { executed: false, testFiles: [] },
       totalTodosRemaining: 0,
+      coverage: { executed: false, passed: true, lineThreshold: 0.9, branchThreshold: 0.75, packageCoverage: [] },
     }
     expect(VerifySummarySchema.safeParse(data).success).toBe(true)
   })

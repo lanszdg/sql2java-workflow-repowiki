@@ -3661,10 +3661,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const warn = r.warnings.length > 0
                 ? `\n\n⚠️ ${r.warnings.length} 条提示：\n${r.warnings.map(w => `  - ${w}`).join("\n")}`
                 : ""
+              const covText = r.coveragePassed == null
+                ? "coverage=skipped"
+                : `coverage=line/${((r.lineRate ?? 0) * 100).toFixed(0)}%/branch/${((r.branchRate ?? 0) * 100).toFixed(0)}% passed=${r.coveragePassed}`
               return {
                 title: "Verify Summary Generated",
-                output: `✔ verify-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / compile=${r.compilationSuccess} / tests=${r.testsPassed ?? "?"}/${r.totalTests ?? "?"}（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
-                metadata: { runId, packageCount: r.packageCount, allPassed: r.allPassed, compilationSuccess: r.compilationSuccess, testsPassed: r.testsPassed, totalTests: r.totalTests, warnings: r.warnings },
+                output: `✔ verify-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / compile=${r.compilationSuccess} / tests=${r.testsPassed ?? "?"}/${r.totalTests ?? "?"} / ${covText}（已过 Zod 校验，coverage-gaps.md 已生成）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
+                metadata: { runId, packageCount: r.packageCount, allPassed: r.allPassed, compilationSuccess: r.compilationSuccess, testsPassed: r.testsPassed, totalTests: r.totalTests, coveragePassed: r.coveragePassed, lineRate: r.lineRate, branchRate: r.branchRate, warnings: r.warnings },
               }
             } catch (e: any) {
               return {
@@ -4404,6 +4407,57 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                     }
                   } catch (e: any) {
                     getLogger().warn("[dispatch]", `读取 review-static.json 注入 fix 静态段失败: ${e.message}`)
+                  }
+                }
+              }
+              // 覆盖率补测清单（jacoco）：仅 verify 触发的 fix 注入。从 verify-summary.json.coverage
+              // 取未达标包的 gaps（class:line 级），按 fixedPackages 过滤，喂给 translator 增量补测。
+              // 与 previousFindings/静态段分开：这是确定性 jacoco 信号，按 class:line 直接补测试覆盖。
+              if (run.currentPhase === "fix" && currentEntry?.branchedFrom === "verify") {
+                const vsPath = join(artifactsDir, "verify-summary.json")
+                if (existsSync(vsPath)) {
+                  try {
+                    const vs = JSON.parse(readFileSync(vsPath, "utf-8")) as {
+                      coverage?: {
+                        passed?: boolean
+                        packageCoverage?: Array<{
+                          packageName?: string
+                          passed?: boolean
+                          gaps?: Array<{ className?: string; line?: number | null; type?: string }>
+                        }>
+                      }
+                    }
+                    const cov = vs.coverage
+                    if (cov && cov.passed === false && Array.isArray(cov.packageCoverage)) {
+                      const fixedSet = new Set((currentEntry?.incrementalContext?.targetPackages ?? []).map((p: string) => p.toUpperCase()))
+                      const failedPkgs = cov.packageCoverage.filter(pc => pc.passed === false && (fixedSet.size === 0 || fixedSet.has((pc.packageName ?? "").toUpperCase())))
+                      const allGaps = failedPkgs.flatMap(pc => (pc.gaps ?? []).map(g => ({ packageName: pc.packageName ?? "GLOBAL", className: g.className ?? "", line: g.line ?? null, type: g.type ?? "line" })))
+                      if (allGaps.length > 0) {
+                        workOrderParts.push(
+                          ``,
+                          `## 未覆盖行清单（jacoco，行<90% 或 分支<75%，按 class:line 补测试覆盖）`,
+                          `- 这些是 verify 阶段 jacoco.xml 解析出的未覆盖点（确定性信号），按 class:line 定位补测试`,
+                          `- 行未覆盖（type=line）：补对应 Aggregate 方法的正向用例（arrange→act→assert）`,
+                          `- 分支未覆盖（type=branch）：补缺失的 if/else 一支（边界/异常路径用例）`,
+                          `- @Disabled 的 Mapper 集成测试路径不计入；详见 ${artifactsDir}/coverage-gaps.md`,
+                        )
+                        for (const g of allGaps) {
+                          workOrderParts.push(`  - { package: ${g.packageName}, class: ${g.className.replace(/\//g, ".")}, line: ${g.line ?? "null"}, type: ${g.type} }`)
+                        }
+                      } else if (failedPkgs.length > 0) {
+                        // 覆盖率不达标但无行级 gap（整方法未调用）
+                        workOrderParts.push(
+                          ``,
+                          `## 覆盖率补测提示（jacoco）`,
+                          `- 以下包覆盖率低于阈值但无行级 gap，可能整方法未被测试调用，检查测试是否覆盖该包 Aggregate 入口：`,
+                        )
+                        for (const pc of failedPkgs) {
+                          workOrderParts.push(`  - { package: ${pc.packageName} }`)
+                        }
+                      }
+                    }
+                  } catch (e: any) {
+                    getLogger().warn("[dispatch]", `读取 verify-summary.json 注入 fix 覆盖率段失败: ${e.message}`)
                   }
                 }
               }
