@@ -3,6 +3,8 @@
  *
  * 验证：mergeUnitAnalysis 读 analysis-packages/{pkg}/*.json（白名单按 procedureOrder 本包 unit），
  * 合并出聚合 analysis-packages/{pkg}.json（{packageName, subprograms}，兼容 AnalysisPackageSchema）。
+ *
+ * 新形状：procedureOrder 由 buildDependencyGraph 从 subprograms.directCalls 按需推导（不再读 dependency-graph.json）。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
@@ -21,16 +23,40 @@ const sub = (name: string) => ({
   name, blocks: [], variables: [], cursors: [], exceptionHandlers: [], translationNotes: [],
 })
 
+interface Sub { name: string; type: "PROCEDURE" | "FUNCTION"; directCalls?: Array<{ package: string; name: string; line: number; kind: "function" | "procedure" }> }
+
+/** 写 packages/{pkg}.json + subprograms/{pkg}.{name}.json */
+function writePkgSubs(art: string, pkg: string, subs: Sub[]) {
+  mkdirSync(join(art, "packages"), { recursive: true })
+  mkdirSync(join(art, "subprograms"), { recursive: true })
+  const procedures = subs.filter(s => s.type === "PROCEDURE").map(s => s.name)
+  const functions = subs.filter(s => s.type === "FUNCTION").map(s => s.name)
+  writeFileSync(join(art, "packages", `${pkg}.json`), JSON.stringify({
+    packageName: pkg, absolutePaths: [], headerPath: null, bodyPath: null,
+    constants: [], variables: [], exceptions: [], types: [], functions, procedures, estimatedLoc: 0,
+  }), "utf-8")
+  for (const s of subs) {
+    writeFileSync(join(art, "subprograms", `${pkg}.${s.name}.json`), JSON.stringify({
+      name: s.name, type: s.type, belongToPackage: pkg, overloadIndex: null, isPrivate: false,
+      headerLocation: null, bodyLocation: { absolutePath: `${pkg}.sql`, lineRange: [1, 1] },
+      parameters: [], returnType: s.type === "FUNCTION" ? "VARCHAR2" : null, loc: 1,
+      directCalls: s.directCalls ?? [],
+    }), "utf-8")
+  }
+}
+
 describe("mergeUnitAnalysis", () => {
   it("合并多 unit 的 subprograms 到聚合 analysis-packages/{pkg}.json", () => {
     const art = join(dir, "a")
     const pkgSub = join(art, "analysis-packages", "PKG_A")
     mkdirSync(pkgSub, { recursive: true })
     mkdirSync(art, { recursive: true })
-    writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({
-      procedureOrder: [["PKG_A.p1"], ["PKG_A.p2"]],
-      functionOwnership: { "PKG_A.f1": "PKG_A.p1" },
-    }), "utf-8")
+    // p1 调 f1（FUNCTION）→ f1 归属 p1，procedureOrder 的 PKG_A unit = {p1, p2}
+    writePkgSubs(art, "PKG_A", [
+      { name: "p1", type: "PROCEDURE", directCalls: [{ package: "PKG_A", name: "f1", line: 1, kind: "function" }] },
+      { name: "p2", type: "PROCEDURE" },
+      { name: "f1", type: "FUNCTION" },
+    ])
     // p1 含根 p1 + cargo FUNCTION f1
     writeFileSync(join(pkgSub, "p1.json"), JSON.stringify({
       unitRefName: "p1", packageName: "PKG_A", subprograms: [sub("p1"), sub("f1")],
@@ -51,9 +77,7 @@ describe("mergeUnitAnalysis", () => {
     const pkgSub = join(art, "analysis-packages", "PKG_B")
     mkdirSync(pkgSub, { recursive: true })
     mkdirSync(art, { recursive: true })
-    writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({
-      procedureOrder: [["PKG_B.p1"]], functionOwnership: {},
-    }), "utf-8")
+    writePkgSubs(art, "PKG_B", [{ name: "p1", type: "PROCEDURE" }])
     writeFileSync(join(pkgSub, "p1.json"), JSON.stringify({
       unitRefName: "p1", packageName: "PKG_B", subprograms: [sub("p1")],
     }), "utf-8")
@@ -68,7 +92,7 @@ describe("mergeUnitAnalysis", () => {
     const pkgSub = join(art, "analysis-packages", "PKG_C")
     mkdirSync(pkgSub, { recursive: true })
     mkdirSync(art, { recursive: true })
-    writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({ procedureOrder: [["PKG_C.p1"]] }), "utf-8")
+    writePkgSubs(art, "PKG_C", [{ name: "p1", type: "PROCEDURE" }])
     // 缺 unitRefName（必填）→ Zod 失败
     writeFileSync(join(pkgSub, "p1.json"), JSON.stringify({
       packageName: "PKG_C", subprograms: [sub("p1")],
@@ -83,7 +107,7 @@ describe("mergeUnitAnalysis", () => {
     const pkgSub = join(art, "analysis-packages", "PKG_D")
     mkdirSync(pkgSub, { recursive: true })
     mkdirSync(art, { recursive: true })
-    writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({ procedureOrder: [["PKG_D.p1"]] }), "utf-8")
+    writePkgSubs(art, "PKG_D", [{ name: "p1", type: "PROCEDURE" }])
     writeFileSync(join(pkgSub, "p1.json"), JSON.stringify({
       unitRefName: "p1", packageName: "PKG_D", subprograms: [sub("p1")],
     }), "utf-8")
@@ -98,7 +122,7 @@ describe("mergeUnitAnalysis", () => {
   it("空包（procedureOrder 无其 unit，子目录不存在）→ 返回 null 不抛错", () => {
     const art = join(dir, "e")
     mkdirSync(art, { recursive: true })
-    writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({ procedureOrder: [["PKG_X.p1"]] }), "utf-8")
+    writePkgSubs(art, "PKG_X", [{ name: "p1", type: "PROCEDURE" }])
     // PKG_NONE 无 unit，子目录不存在；聚合空文件由 analysis-builder 预写（此处不模拟）
     expect(mergeUnitAnalysis(art, "PKG_NONE")).toBeNull()
   })

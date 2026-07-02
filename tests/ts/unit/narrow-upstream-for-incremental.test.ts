@@ -40,7 +40,6 @@ describe("narrowUpstreamForIncremental", () => {
     expect(result).toContain("plan.json")
     expect(result).toContain("scaffold.json")
     expect(result).toContain("dedup.json")
-    expect(result).toContain("dependency-graph.json")
     expect(result).toContain("review-static.json")
     expect(result).toContain("review.json")
     expect(result).toContain("review-summary.json")
