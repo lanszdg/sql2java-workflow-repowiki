@@ -1,8 +1,8 @@
 /**
  * engine-cross-schema.test.ts — 跨 Schema 校验集成测试
  *
- * 测试 validateCrossSchema 的 CrossSchemaFinding 分级（blocking / warning）
- * 以及 advance() 的三路分支（blocking 拒绝 / warningPending 确认 / 放行）。
+ * 新形状：依赖图由 buildDependencyGraph 从 packages/*.json 按需推导（graph.packageNames = packages 文件名）。
+ * 测试 validateCrossSchema 的 CrossSchemaFinding 分级（blocking / warning）以及 advance() 的三路分支。
  */
 
 import { describe, it, expect, afterEach } from "vitest"
@@ -11,30 +11,26 @@ import { createEngineWithTempDir, writeArtifact } from "../helpers/engine-factor
 
 const RUN_ID = "run-cross-schema"
 
-/** 基础 setup：inventory 含 CORE_PKG + EXTRA_PKG，analysis 也含两包 */
-function setupBaseline(dir: string) {
+function writeInv(dir: string, packageNames: string[]) {
   writeArtifact(dir, RUN_ID, "inventory.json", {
-    sourcePath: "src", packageNames: ["CORE_PKG", "EXTRA_PKG"], tables: [],
-    standaloneProcedures: [], triggers: [], views: [], sequences: [],
+    sourcePath: "src", packageNames, tableNames: [], triggers: [], views: [], sequences: [],
   })
-  writeArtifact(dir, RUN_ID, "dependency-graph.json", {
-    callGraph: {},
-    packageDependency: {},
-    translationOrder: [["CORE_PKG"], ["EXTRA_PKG"]],
-    complexity: {},
-    sccGroups: [],
-    packageNames: ["CORE_PKG", "EXTRA_PKG"],
+}
+function writePkg(dir: string, pkg: string) {
+  writeArtifact(dir, RUN_ID, `packages/${pkg}.json`, {
+    packageName: pkg, absolutePaths: [], headerPath: null, bodyPath: null,
+    constants: [], variables: [], exceptions: [], types: [], functions: [], procedures: [], estimatedLoc: 0,
   })
-  writeArtifact(dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-    packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-    procedures: [{ name: "GET_ITEM", type: "function", params: [], loc: 50, lineRange: [1, 50] }],
-    types: [], variables: [], constants: [],
-  })
-  writeArtifact(dir, RUN_ID, "inventory-packages/EXTRA_PKG.json", {
-    packageName: "EXTRA_PKG", bodyFile: "src/extra.pkb",
-    procedures: [{ name: "DO_WORK", type: "procedure", params: [], loc: 30, lineRange: [1, 30] }],
-    types: [], variables: [], constants: [],
-  })
+}
+function writeAnaPkg(dir: string, pkg: string) {
+  writeArtifact(dir, RUN_ID, `analysis-packages/${pkg}.json`, { packageName: pkg, subprograms: [] })
+}
+
+/** 基础 setup：inventory 含 CORE_PKG + EXTRA_PKG，packages/ 也含两包 */
+function setupBaseline(dir: string) {
+  writeInv(dir, ["CORE_PKG", "EXTRA_PKG"])
+  writePkg(dir, "CORE_PKG")
+  writePkg(dir, "EXTRA_PKG")
 }
 
 /** 将 run 推到指定阶段（跳过前置阶段的实际执行） */
@@ -57,7 +53,7 @@ describe("validateCrossSchema — 包名一致性", () => {
   let ctx: ReturnType<typeof createEngineWithTempDir>
   afterEach(() => ctx?.cleanup())
 
-  it("dependency-graph 引用的包在 inventory 中存在 → 无 finding", () => {
+  it("依赖图引用的包在 inventory 中存在 → 无 finding", () => {
     ctx = createEngineWithTempDir()
     setupBaseline(ctx.dir)
 
@@ -68,54 +64,25 @@ describe("validateCrossSchema — 包名一致性", () => {
     expect(findings.length).toBe(0)
   })
 
-  it("dependency-graph 缺少包（inventory 有但 dependency-graph 没有）→ warning", () => {
+  it("依赖图缺少包（inventory 有但 packages/ 没有）→ warning", () => {
     ctx = createEngineWithTempDir()
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG", "EXTRA_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG"]],
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG"],  // 缺少 EXTRA_PKG
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [{ name: "GET_ITEM", type: "function", params: [], loc: 50, lineRange: [1, 50] }],
-      types: [], variables: [], constants: [],
-    })
+    writeInv(ctx.dir, ["CORE_PKG", "EXTRA_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")  // packages/ 缺 EXTRA_PKG → graph.packageNames 缺 EXTRA_PKG
 
     const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(
       { runId: RUN_ID, currentPhase: "analyze", status: "running", phaseHistory: [], metadata: {}, createdAt: "", updatedAt: "" },
       "analyze",
     )
-    const missing = findings.find(f => f.message.includes("dependency-graph 缺少包: EXTRA_PKG"))
+    const missing = findings.find(f => f.message.includes("依赖图缺少包: EXTRA_PKG"))
     expect(missing).toBeTruthy()
     expect(missing!.severity).toBe("warning")
   })
 
-  it("inventory 缺少包（dependency-graph 有但 inventory 没有）→ warning", () => {
+  it("inventory 缺少包（packages/ 有但 inventory 没有）→ warning", () => {
     ctx = createEngineWithTempDir()
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG", "GHOST_PKG"]],
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG", "GHOST_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [{ name: "GET_ITEM", type: "function", params: [], loc: 50, lineRange: [1, 50] }],
-      types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", bodyFile: "src/ghost.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
+    writeInv(ctx.dir, ["CORE_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")
+    writePkg(ctx.dir, "GHOST_PKG")  // packages/ 多 GHOST_PKG → graph 有但 inventory 没
 
     const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(
       { runId: RUN_ID, currentPhase: "analyze", status: "running", phaseHistory: [], metadata: {}, createdAt: "", updatedAt: "" },
@@ -124,41 +91,6 @@ describe("validateCrossSchema — 包名一致性", () => {
     const extra = findings.find(f => f.message.includes("inventory 缺少包: GHOST_PKG"))
     expect(extra).toBeTruthy()
     expect(extra!.severity).toBe("warning")
-  })
-})
-
-describe("validateCrossSchema — translationOrder 覆盖", () => {
-  let ctx: ReturnType<typeof createEngineWithTempDir>
-  afterEach(() => ctx?.cleanup())
-
-  it("translationOrder 缺少包 → warning", () => {
-    ctx = createEngineWithTempDir()
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG", "EXTRA_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG"]],  // 缺少 EXTRA_PKG
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG", "EXTRA_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/EXTRA_PKG.json", {
-      packageName: "EXTRA_PKG", bodyFile: "src/extra.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-
-    const findings: CrossSchemaFinding[] = ctx.engine.validateCrossSchema(
-      { runId: RUN_ID, currentPhase: "analyze", status: "running", phaseHistory: [], metadata: {}, createdAt: "", updatedAt: "" },
-      "analyze",
-    )
-    const missing = findings.find(f => f.message.includes("translationOrder 缺少包: EXTRA_PKG"))
-    expect(missing).toBeTruthy()
-    expect(missing!.severity).toBe("warning")
   })
 })
 
@@ -221,7 +153,6 @@ describe("validateCrossSchema — plan 映射覆盖", () => {
     const overflow = findings.find(f => f.message.includes("plan 越界映射包: EXTRA_PKG"))
     expect(overflow).toBeTruthy()
     expect(overflow!.severity).toBe("warning")
-    // out-of-scope 包不该再被报"未映射"（scope 下期望集只是 scopePackages）
     const falseMissing = findings.find(f => f.message.includes("plan 未映射包: EXTRA_PKG"))
     expect(falseMissing).toBeFalsy()
   })
@@ -234,7 +165,6 @@ describe("validateCrossSchema — plan 映射覆盖", () => {
         groupId: "com.example", artifactId: "myapp",
         packageBase: "com.example", javaVersion: "1.8", springBootVersion: "2.7.x",
       },
-      // scope 只覆盖 CORE_PKG，plan 正确地只映射 CORE_PKG（EXTRA_PKG 不映射）
       packageMappings: [
         { oraclePackage: "CORE_PKG", javaPackage: "com.example.core",
           mapperInterface: "CoreMapper", accessIntf: "CoreAccessIntf", accessImpl: "CoreAccessImpl", aggregate: "CoreAggregate" },
@@ -247,7 +177,6 @@ describe("validateCrossSchema — plan 映射覆盖", () => {
       { runId: RUN_ID, currentPhase: "plan", status: "running", phaseHistory: [], metadata: { scopePackages: ["CORE_PKG"] }, createdAt: "", updatedAt: "" },
       "plan",
     )
-    // EXTRA_PKG 是 out-of-scope，未映射是正确的，不应报 warning
     const falseMissing = findings.find(f => f.message.includes("plan 未映射包: EXTRA_PKG"))
     expect(falseMissing).toBeFalsy()
     const overflow = findings.find(f => f.message.includes("plan 越界映射包"))
@@ -256,84 +185,43 @@ describe("validateCrossSchema — plan 映射覆盖", () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
-// advance() — 三路分支行为测试
+// advance() — warning 自动放行
 // ═══════════════════════════════════════════════════════════════
 
-describe("advance() — blocking 拒绝", () => {
+describe("advance() — warning 自动放行", () => {
   let ctx: ReturnType<typeof createEngineWithTempDir>
   afterEach(() => ctx?.cleanup())
 
-  it("dependency-graph 缺少包 → warning 自动放行（不再 blocking）", () => {
+  it("依赖图缺少包 → warning 自动放行（不再 blocking）", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
     pushToPhase(engine, "analyze")
 
-    // inventory 有两包，analysis 只有 CORE_PKG
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG", "EXTRA_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG"]],  // 也缺少 EXTRA_PKG
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/EXTRA_PKG.json", {
-      packageName: "EXTRA_PKG", bodyFile: "src/extra.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", subprograms: [],
-    })
+    // inventory 两包，packages/ 只 CORE_PKG（graph 缺 EXTRA_PKG）
+    writeInv(ctx.dir, ["CORE_PKG", "EXTRA_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")
+    // analysis-packages 覆盖 inventory 全部包（analyze 边界校验需要）
+    writeAnaPkg(ctx.dir, "CORE_PKG")
+    writeAnaPkg(ctx.dir, "EXTRA_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)
     expect(result.crossSchemaWarnings).toBeDefined()
     expect(result.crossSchemaWarnings!.some(w => w.includes("EXTRA_PKG"))).toBe(true)
   })
-})
 
-describe("advance() — warning 自动放行", () => {
-  let ctx: ReturnType<typeof createEngineWithTempDir>
-  afterEach(() => ctx?.cleanup())
-
-  it("仅有 warning → 不阻断，自动放行并附带 crossSchemaWarnings", () => {
+  it("inventory 缺少包 → warning 自动放行", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
     pushToPhase(engine, "analyze")
 
-    // inventory 只有一包，analysis 有两包 → inventory 缺少包 = warning
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG", "GHOST_PKG"]],
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG", "GHOST_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", bodyFile: "src/ghost.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", subprograms: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", subprograms: [],
-    })
+    // inventory 只 CORE_PKG，packages/ 有 CORE_PKG + GHOST_PKG（graph 多 GHOST_PKG）
+    writeInv(ctx.dir, ["CORE_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")
+    writePkg(ctx.dir, "GHOST_PKG")
+    writeAnaPkg(ctx.dir, "CORE_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)
@@ -347,30 +235,10 @@ describe("advance() — warning 自动放行", () => {
     engine.start("sql2java", RUN_ID)
     pushToPhase(engine, "analyze")
 
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG", "GHOST_PKG"]],
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG", "GHOST_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", bodyFile: "src/ghost.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", subprograms: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", subprograms: [],
-    })
+    writeInv(ctx.dir, ["CORE_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")
+    writePkg(ctx.dir, "GHOST_PKG")
+    writeAnaPkg(ctx.dir, "CORE_PKG")
 
     const result = engine.advance(RUN_ID, { acceptWarnings: true })
     expect(result.rejected).toBe(false)
@@ -389,41 +257,17 @@ describe("advance() — 混合场景", () => {
     engine.start("sql2java", RUN_ID)
     pushToPhase(engine, "analyze")
 
-    // inventory 有 CORE_PKG + EXTRA_PKG，analysis 有 CORE_PKG + GHOST_PKG
-    // → EXTRA_PKG: dependency-graph 缺少包 = warning
+    // inventory 有 CORE_PKG + EXTRA_PKG，packages/ 有 CORE_PKG + GHOST_PKG
+    // → EXTRA_PKG: 依赖图缺少包 = warning
     // → GHOST_PKG: inventory 缺少包 = warning
-    writeArtifact(ctx.dir, RUN_ID, "inventory.json", {
-      sourcePath: "src", packageNames: ["CORE_PKG", "EXTRA_PKG"], tables: [],
-      standaloneProcedures: [], triggers: [], views: [], sequences: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "dependency-graph.json", {
-      callGraph: {}, packageDependency: {},
-      translationOrder: [["CORE_PKG", "GHOST_PKG"]],
-      complexity: {}, sccGroups: [],
-      packageNames: ["CORE_PKG", "GHOST_PKG"],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", bodyFile: "src/core.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/EXTRA_PKG.json", {
-      packageName: "EXTRA_PKG", bodyFile: "src/extra.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "inventory-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", bodyFile: "src/ghost.pkb",
-      procedures: [], types: [], variables: [], constants: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/CORE_PKG.json", {
-      packageName: "CORE_PKG", subprograms: [],
-    })
-    writeArtifact(ctx.dir, RUN_ID, "analysis-packages/GHOST_PKG.json", {
-      packageName: "GHOST_PKG", subprograms: [],
-    })
+    writeInv(ctx.dir, ["CORE_PKG", "EXTRA_PKG"])
+    writePkg(ctx.dir, "CORE_PKG")
+    writePkg(ctx.dir, "GHOST_PKG")
+    writeAnaPkg(ctx.dir, "CORE_PKG")
+    writeAnaPkg(ctx.dir, "EXTRA_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)
-    // 两条 warning 都附带在 crossSchemaWarnings
     expect(result.crossSchemaWarnings).toBeDefined()
     expect(result.crossSchemaWarnings!.some(w => w.includes("EXTRA_PKG"))).toBe(true)
     expect(result.crossSchemaWarnings!.some(w => w.includes("GHOST_PKG"))).toBe(true)

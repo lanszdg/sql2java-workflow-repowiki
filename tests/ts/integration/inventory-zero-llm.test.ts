@@ -16,7 +16,7 @@ import { WorkflowEngine } from "@workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "@workflow/workflow-definitions"
 import { scanSource } from "@workflow/plsql-scanner"
 import { buildInventoryFromIndex } from "@workflow/inventory-builder"
-import { InventoryPackageSchema, InventorySchema } from "@workflow/artifact-schemas"
+import { PackageArtifactSchema, InventorySchema } from "@workflow/artifact-schemas"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
 let engine: WorkflowEngine
@@ -47,8 +47,8 @@ describe("inventory 零 LLM 接线", () => {
     const inv = JSON.parse(readFileSync(join(artifactsDir, "inventory.json"), "utf-8"))
     expect(InventorySchema.safeParse(inv).success).toBe(true)
     for (const f of ["BASE_PKG", "CORE_PKG"]) {
-      const pkg = JSON.parse(readFileSync(join(artifactsDir, "inventory-packages", `${f}.json`), "utf-8"))
-      expect(InventoryPackageSchema.safeParse(pkg).success, `${f} 校验失败`).toBe(true)
+      const pkg = JSON.parse(readFileSync(join(artifactsDir, "packages", `${f}.json`), "utf-8"))
+      expect(PackageArtifactSchema.safeParse(pkg).success, `${f} 校验失败`).toBe(true)
     }
   })
 
@@ -67,7 +67,7 @@ describe("inventory 零 LLM 接线", () => {
   it("analyze 阶段能读到 inventory 产物（下游可消费）", () => {
     const artifactsDir = join(dir, runId)
     expect(existsSync(join(artifactsDir, "inventory.json"))).toBe(true)
-    expect(existsSync(join(artifactsDir, "inventory-packages", "CORE_PKG.json"))).toBe(true)
+    expect(existsSync(join(artifactsDir, "packages", "CORE_PKG.json"))).toBe(true)
     const run = engine.status(runId)!
     expect(run.currentPhase).toBe("analyze")
   })

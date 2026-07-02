@@ -1,21 +1,19 @@
 /**
- * inventory-analysis-backstop.test.ts — inventory advance 缺 dependency-graph.json 时引擎兜底生成
+ * inventory-analysis-backstop.test.ts — inventory advance 缺 reduce 时引擎兜底生成
  *
- * 真实执行中 inventory worker 偶发漏调 generateDependencyGraph → dependency-graph.json 缺失 →
- * validateArtifactOnDisk(inventory) 卡住 advance。修复后引擎在该 gate 兜底调用
- * buildDependencyGraphFromIndex（零 LLM 确定性），缺失自动生成；生成失败才报错。
+ * 真实执行中 inventory worker 偶发漏调 generateDependencyGraph → complexity 未写 / 无子程序包
+ * analysis-packages 缺失 → validateArtifactOnDisk(inventory) 兜底调用 buildDependencyGraphFromIndex
+ *（零 LLM 确定性）：complexity 写入 packages/{PKG}.json + 无子程序包空 analysis-packages。
  *
  * 注：validateArtifactOnDisk 用插件常量 ARTIFACT_DIR=".workflow-artifacts"（相对 cwd），
  * 无法重定向到 tmpdir，故在 cwd 下用唯一 runId 建临时 artifact 目录，测后清理。
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs"
+import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { tmpdir } from "node:os"
 import { scanSource } from "@workflow/plsql-scanner"
 import { buildInventoryFromIndex } from "@workflow/inventory-builder"
-import { DependencyGraphSchema } from "@workflow/artifact-schemas"
 import { validateArtifactOnDisk } from "@plugins/workflow-engine"
 import type { WorkflowRun } from "@workflow/engine-core"
 
@@ -31,7 +29,7 @@ beforeAll(async () => {
   // 1) prescan → inventory-index.json
   const index = await scanSource(FIXTURE_TINY)
   writeFileSync(join(ARTIFACTS_DIR, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  // 2) 纯代码生成 inventory-packages + inventory.json（不生成 dependency-graph.json —— 模拟 worker 漏调）
+  // 2) 纯代码生成 packages/+subprograms/+tables/+inventory.json（不调 generateDependencyGraph —— 模拟 worker 漏调）
   buildInventoryFromIndex(ARTIFACTS_DIR)
 }, 60000)
 
@@ -43,32 +41,36 @@ function makeRun(phase: string): WorkflowRun {
   return { runId: RUN_ID, currentPhase: phase } as unknown as WorkflowRun
 }
 
-describe("inventory dependency-graph.json 缺失兜底", () => {
-  it("缺 dependency-graph.json → 引擎兜底生成，validateArtifactOnDisk 返回 null（放行 advance）", () => {
-    expect(existsSync(join(ARTIFACTS_DIR, "dependency-graph.json"))).toBe(false)
+describe("inventory reduce 缺失兜底", () => {
+  it("缺 reduce → 引擎兜底：complexity 写入 packages + 空包 analysis-packages，validateArtifactOnDisk 返回 null", () => {
+    // 兜底前：packages/CORE_PKG.json 无 complexity；analysis-packages/BASE_PKG.json 不存在
+    const coreBefore = JSON.parse(readFileSync(join(ARTIFACTS_DIR, "packages", "CORE_PKG.json"), "utf-8"))
+    expect(coreBefore.complexity).toBeUndefined()
+    expect(existsSync(join(ARTIFACTS_DIR, "analysis-packages", "BASE_PKG.json"))).toBe(false)
+
     const err = validateArtifactOnDisk(makeRun("inventory"))
     expect(err).toBeNull()
-    // 兜底生成后 dependency-graph.json 存在且过 Zod
-    expect(existsSync(join(ARTIFACTS_DIR, "dependency-graph.json"))).toBe(true)
-    const a = JSON.parse(readFileSync(join(ARTIFACTS_DIR, "dependency-graph.json"), "utf-8"))
-    expect(DependencyGraphSchema.safeParse(a).success).toBe(true)
+
+    // 兜底后：complexity 已写入；无子程序包 BASE_PKG 空聚合已生成
+    const coreAfter = JSON.parse(readFileSync(join(ARTIFACTS_DIR, "packages", "CORE_PKG.json"), "utf-8"))
+    expect(coreAfter.complexity).toBeDefined()
+    expect(coreAfter.complexity.riskLevel).toBe("high")
+    const base = JSON.parse(readFileSync(join(ARTIFACTS_DIR, "analysis-packages", "BASE_PKG.json"), "utf-8"))
+    expect(base).toEqual({ packageName: "BASE_PKG", subprograms: [] })
   })
 
-  it("dependency-graph.json 已存在 → 不再报缺失（幂等，第二次校验直接放行）", () => {
+  it("reduce 已生成 → 幂等，第二次校验直接放行", () => {
     const err = validateArtifactOnDisk(makeRun("inventory"))
     expect(err).toBeNull()
   })
 
-  it("inventory-index.json 损坏 → 兜底生成失败，返回明确错误（不抛错）", () => {
+  it("inventory.json 缺失 → validateArtifactOnDisk 返回明确错误（不抛错）", () => {
     const tmpRun = `test-analysis-backstop-bad-${process.pid}`
     const tmpDir = join(".workflow-artifacts", tmpRun)
     mkdirSync(tmpDir, { recursive: true })
-    // 只写一个损坏的 inventory-index.json + 最小 inventory-packages（让 validateInventoryPackages 通过或前置失败）
-    writeFileSync(join(tmpDir, "inventory-index.json"), "{ not valid json", "utf-8")
-    writeFileSync(join(tmpDir, "inventory.json"), JSON.stringify({ packageNames: [] }), "utf-8")
+    // 不写 inventory.json（validateInventoryPackages 第一步即失败）
     try {
       const err = validateArtifactOnDisk({ runId: tmpRun, currentPhase: "inventory" } as unknown as WorkflowRun)
-      // 兜底生成失败应返回错误字符串（而非 null），且不抛异常
       expect(err).not.toBeNull()
       expect(typeof err).toBe("string")
     } finally {

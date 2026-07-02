@@ -25,7 +25,7 @@ beforeAll(async () => {
   const index = await scanSource(FIXTURE_TINY)
   writeFileSync(join(ARTIFACTS_DIR, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
   buildInventoryFromIndex(ARTIFACTS_DIR)
-  buildDependencyGraphFromIndex(ARTIFACTS_DIR) // inventory advance 校验前 dependency-graph.json 须就绪
+  buildDependencyGraphFromIndex(ARTIFACTS_DIR) // inventory advance 校验前 complexity/兜底须就绪
 }, 60000)
 
 afterAll(() => {
@@ -42,7 +42,6 @@ function makeRun(mainEntry: string | undefined): WorkflowRun {
 
 describe("过程级 mainEntry 不可解析 → 硬失败（P2-1）", () => {
   it("包不存在 → validateArtifactOnDisk 返回错误（不静默放行）", () => {
-    expect(existsSync(join(ARTIFACTS_DIR, "dependency-graph.json"))).toBe(true)
     const err = validateArtifactOnDisk(makeRun("MISSING_PKG.no_such_proc"))
     expect(err).not.toBeNull()
     expect(typeof err).toBe("string")
