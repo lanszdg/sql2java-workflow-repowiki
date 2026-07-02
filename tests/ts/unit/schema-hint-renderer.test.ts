@@ -42,17 +42,18 @@ describe("renderSchemaHint", () => {
 
   // ── 关键枚举值抽查 ──
 
-  it("inventory 阶段包含 direction 枚举值", () => {
+  it("inventory 阶段包含 trigger timing/level 枚举值", () => {
     const hint = renderSchemaHint("inventory")
-    expect(hint).toContain('"IN"')
-    expect(hint).toContain('"OUT"')
-    expect(hint).toContain('"IN OUT"')
+    expect(hint).toContain('"before"')
+    expect(hint).toContain('"after"')
+    expect(hint).toContain('"row"')
   })
 
-  it("inventory 阶段包含 procedure/function 枚举", () => {
+  it("inventory 阶段包含 trigger events 枚举", () => {
     const hint = renderSchemaHint("inventory")
-    expect(hint).toContain('"procedure"')
-    expect(hint).toContain('"function"')
+    expect(hint).toContain('"insert"')
+    expect(hint).toContain('"update"')
+    expect(hint).toContain('"delete"')
   })
 
   it("review 阶段包含 severity 枚举", () => {
@@ -284,10 +285,10 @@ describe("renderSchemaHint — 常见被拒原因 (COMMON_PITFALLS)", () => {
     }
   })
 
-  it("inventory 阶段 pitfalls 包含 direction 大写关键词", () => {
+  it("inventory 阶段 pitfalls 包含 mode 大写关键词", () => {
     const hint = renderSchemaHint("inventory")
     expect(hint).toContain("⚡ 常见被拒原因")
-    expect(hint).toContain("direction")
+    expect(hint).toContain("mode")
     expect(hint).toContain('"IN"')
   })
 

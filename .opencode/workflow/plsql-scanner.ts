@@ -697,18 +697,25 @@ function extractTableFromText(code: string, tables: TableIndex[], relPath: strin
     const columns: ColumnIndex[] = []
     const pkCols = new Set<string>()
     const foreignKeys: ForeignKeyInfo[] = []
-    // 列定义行（粗提取）。类型字符集含逗号/点，容纳 NUMBER(20,6) 等带精度的类型
-    //（旧 [\w()] 遇精度逗号截断成 "NUMBER(20"）。
-    for (const colMatch of body.matchAll(/^\s*([\w]+)\s+([\w(),.]+(?:\s+[\w(),.]+)*?)(\s+DEFAULT\s+[^,]+)?(\s*,)?/gim)) {
-      const colName = cleanName(colMatch[1])
-      if (!colName || /^(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|KEY|NOT|NULL)\b/i.test(colName)) continue
-      // 去尾逗号：类型正则的字符集含逗号（为 NUMBER(20,6) 精度），UDT 列 "t_dimension," 会误带列分隔逗号
-      const type = normalizeTypeText(colMatch[2].replace(/,\s*$/, ""))
-      const rest = colMatch[0]
+    // 列定义逐行解析：name + rest（rest = 类型 + 约束 DEFAULT/NOT NULL/PRIMARY KEY 等，到逗号或行尾）。
+    // 旧 multiline 正则只消费到类型，NOT NULL 等约束不在 rest 内 → nullable 误判。
+    for (const rawLine of body.split("\n")) {
+      const trimmed = rawLine.trim().replace(/,\s*$/, "")
+      if (!trimmed) continue
+      // 跳过外联约束行（CONSTRAINT / PRIMARY KEY ... 单独行）
+      if (/^(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|KEY|NOT|NULL)\b/i.test(trimmed)) continue
+      const m = trimmed.match(/^(\w+)\s+(.+)$/)
+      if (!m) continue
+      const colName = cleanName(m[1])
+      if (!colName) continue
+      const rest = m[2].trim()  // "VARCHAR2(40) NOT NULL" / "NUMBER(20,6) DEFAULT 0" / "t_dimension"
+      // 类型 = 首个 token（含括号精度），去尾逗号（UDT 列无约束时 rest 即 "t_dimension,"）
+      const typeMatch = rest.match(/^([\w(),.]+)/)
+      const type = normalizeTypeText((typeMatch ? typeMatch[1] : rest).replace(/,\s*$/, ""))
       const notNull = /\bNOT\s+NULL\b/i.test(rest)
       const inlinePk = /\bPRIMARY\s+KEY\b/i.test(rest)
-      // DEFAULT 值在 NOT NULL / 逗号 / 行尾前截断（旧 [^,]+ 会把 "DEFAULT 'RAW' NOT NULL" 整段吞下）
-      const defMatch = rest.match(/DEFAULT\s+([^,]*?)(?:\s+NOT\s+NULL\b|\s*,|\s*$)/i)
+      // DEFAULT 值在 NOT NULL / 行尾前截断（避免吞下 "DEFAULT 'RAW' NOT NULL" 的 NOT NULL）
+      const defMatch = rest.match(/DEFAULT\s+([^,]*?)(?:\s+NOT\s+NULL\b|\s*$)/i)
       columns.push({
         name: colName,
         oracleType: type,

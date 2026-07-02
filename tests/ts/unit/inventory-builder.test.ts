@@ -2,8 +2,8 @@
  * inventory-builder.test.ts — 验证 prescan index → 下游 inventory artifacts 的纯代码转换
  *
  * inventory 阶段零 LLM 的核心：scanSource 产出 inventory-index.json（全字段）后，
- * buildInventoryFromIndex 直接生成 inventory-packages/{PKG}.json + inventory.json，
- * 产物须通过 InventoryPackageSchema / InventorySchema 校验，且下游可消费。
+ * buildInventoryFromIndex 生成 packages/{PKG}.json + subprograms/{PKG.METHOD}.json +
+ * tables/{TABLE}.json + inventory.json，产物须通过对应 Zod schema 校验，且下游可消费。
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
@@ -12,7 +12,9 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { scanSource } from "@workflow/plsql-scanner"
 import { buildInventoryFromIndex } from "@workflow/inventory-builder"
-import { InventoryPackageSchema, InventorySchema } from "@workflow/artifact-schemas"
+import {
+  PackageArtifactSchema, SubprogramArtifactSchema, TableArtifactSchema, InventorySchema,
+} from "@workflow/artifact-schemas"
 import { resolve } from "node:path"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
@@ -31,21 +33,43 @@ afterAll(() => {
 })
 
 describe("buildInventoryFromIndex", () => {
-  it("生成 inventory-packages/ 逐包文件 + inventory.json", () => {
+  it("生成 packages/ + subprograms/ + tables/ + inventory.json", () => {
     const r = buildInventoryFromIndex(dir)
     expect(r.packageCount).toBe(3)
     expect(r.tableCount).toBe(6)
-    const pkgFiles = readdirSync(join(dir, "inventory-packages")).filter(f => f.endsWith(".json"))
+    const pkgFiles = readdirSync(join(dir, "packages")).filter(f => f.endsWith(".json"))
     // tiny fixture 含独立函数 fn_abc_class → 被 injectStandaloneVirtualPackages 注入为虚拟包
     expect(pkgFiles.map(f => f.replace(".json", "")).sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
+    expect(existsSync(join(dir, "subprograms"))).toBe(true)
+    expect(existsSync(join(dir, "tables"))).toBe(true)
     expect(existsSync(join(dir, "inventory.json"))).toBe(true)
   })
 
-  it("inventory-packages 文件通过 InventoryPackageSchema 校验", () => {
-    const pkgDir = join(dir, "inventory-packages")
+  it("packages/ 文件通过 PackageArtifactSchema 校验", () => {
+    const pkgDir = join(dir, "packages")
     for (const f of readdirSync(pkgDir)) {
       const parsed = JSON.parse(readFileSync(join(pkgDir, f), "utf-8"))
-      expect(InventoryPackageSchema.safeParse(parsed).success, `${f} 校验失败`).toBe(true)
+      expect(PackageArtifactSchema.safeParse(parsed).success, `${f} 校验失败`).toBe(true)
+    }
+  })
+
+  it("subprograms/ 文件通过 SubprogramArtifactSchema 校验", () => {
+    const subpDir = join(dir, "subprograms")
+    const files = readdirSync(subpDir).filter(f => f.endsWith(".json"))
+    expect(files.length).toBeGreaterThan(0)
+    for (const f of files) {
+      const parsed = JSON.parse(readFileSync(join(subpDir, f), "utf-8"))
+      expect(SubprogramArtifactSchema.safeParse(parsed).success, `${f} 校验失败`).toBe(true)
+    }
+  })
+
+  it("tables/ 文件通过 TableArtifactSchema 校验", () => {
+    const tableDir = join(dir, "tables")
+    const files = readdirSync(tableDir).filter(f => f.endsWith(".json"))
+    expect(files.length).toBe(6)
+    for (const f of files) {
+      const parsed = JSON.parse(readFileSync(join(tableDir, f), "utf-8"))
+      expect(TableArtifactSchema.safeParse(parsed).success, `${f} 校验失败`).toBe(true)
     }
   })
 
@@ -59,32 +83,63 @@ describe("buildInventoryFromIndex", () => {
     expect(inv.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
   })
 
-  it("CORE_PKG 逐包文件含 procedures（含重载）+ types + variables", () => {
-    const core = JSON.parse(readFileSync(join(dir, "inventory-packages", "CORE_PKG.json"), "utf-8"))
-    expect(core.procedures.length).toBe(12)
-    expect(core.procedures.filter((p: any) => p.name === "create_item").length).toBe(2)
+  it("CORE_PKG 包文件含 functions/procedures 名字索引 + types + variables", () => {
+    const core = JSON.parse(readFileSync(join(dir, "packages", "CORE_PKG.json"), "utf-8"))
+    // procedures/functions 仅为名字索引（去重；重载同名只出现一次，重载序号在 subprograms 文件名）
+    expect(core.procedures).toContain("CREATE_ITEM")
+    expect(core.functions).toContain("GET_ITEM")
     expect(core.types.length).toBe(2)
     expect(core.variables.length).toBe(1)
-    // 参数 + returnType 已从 prescan 带过来
-    const getItem = core.procedures.find((p: any) => p.name === "get_item")
+    expect(core.headerPath).toBeTruthy()
+    expect(core.bodyPath).toBeTruthy()
+  })
+
+  it("CORE_PKG 子程序详情在 subprograms/（含重载 + 参数 + returnType）", () => {
+    const subpDir = join(dir, "subprograms")
+    const coreFiles = readdirSync(subpDir).filter(f => f.startsWith("CORE_PKG."))
+    // 5 functions + 6 procedures（create_item 重载 2 版多 1 个）→ 12 个子程序文件
+    expect(coreFiles.length).toBe(12)
+    // 重载：CREATE_ITEM 有两个文件（裸名 + __2）
+    const createItemFiles = coreFiles.filter(f => f.startsWith("CORE_PKG.CREATE_ITEM"))
+    expect(createItemFiles.length).toBe(2)
+    const getItem = JSON.parse(readFileSync(join(subpDir, "CORE_PKG.GET_ITEM.json"), "utf-8"))
+    expect(getItem.type).toBe("FUNCTION")
     expect(getItem.returnType).toBe("t_item%ROWTYPE")
-    expect(getItem.params[0]).toEqual({ name: "p_id", oracleType: "NUMBER", direction: "IN" })
+    expect(getItem.parameters[0]).toMatchObject({ name: "P_ID", type: "NUMBER", mode: "IN" })
+    expect(getItem.bodyLocation.lineRange).toEqual([47, 54])
+    // 重载：CREATE_ITEM__2（5 参数版）
+    const ci2 = readdirSync(subpDir).find(f => f === "CORE_PKG.CREATE_ITEM__2.json")
+    expect(ci2).toBeDefined()
+    const ci2Json = JSON.parse(readFileSync(join(subpDir, ci2!), "utf-8"))
+    expect(ci2Json.overloadIndex).toBe(2)
+    expect(ci2Json.parameters.length).toBe(5)
   })
 
-  it("BASE_PKG 逐包文件：header-only，5 常量、0 procedure", () => {
-    const base = JSON.parse(readFileSync(join(dir, "inventory-packages", "BASE_PKG.json"), "utf-8"))
+  it("BASE_PKG 包文件：header-only，5 常量、0 子程序", () => {
+    const base = JSON.parse(readFileSync(join(dir, "packages", "BASE_PKG.json"), "utf-8"))
     expect(base.procedures).toHaveLength(0)
+    expect(base.functions).toHaveLength(0)
     expect(base.constants).toHaveLength(5)
-    expect(base.bodyFile).toBeNull()
+    expect(base.bodyPath).toBeNull()
+    expect(base.headerPath).toBeTruthy()
   })
 
-  it("inventory.json 含 tables columns + triggers + sequences + standalone", () => {
-    const inv = JSON.parse(readFileSync(join(dir, "inventory.json"), "utf-8"))
-    const tItem = inv.tables.find((t: any) => t.name === "T_ITEM")
+  it("tables/T_ITEM.json 含列结构 + 主键；inventory.json 含 triggers + sequences", () => {
+    const tItem = JSON.parse(readFileSync(join(dir, "tables", "T_ITEM.json"), "utf-8"))
     expect(tItem.columns.length).toBe(10)
-    expect(tItem.columns.find((c: any) => c.name === "item_id")).toMatchObject({ isPrimaryKey: true, nullable: false })
+    expect(tItem.columns.find((c: any) => c.name === "ITEM_ID")).toMatchObject({ isPrimaryKey: true, nullable: false })
+    const inv = JSON.parse(readFileSync(join(dir, "inventory.json"), "utf-8"))
     expect(inv.triggers[0]).toMatchObject({ timing: "after", level: "row", targetTable: "T_ITEM", events: ["update"] })
     expect(inv.sequences.length).toBe(4)
-    expect(inv.standaloneProcedures[0]).toMatchObject({ name: "fn_abc_class", type: "function", returnType: "VARCHAR2" })
+  })
+
+  it("standalone 函数注入为虚拟包子程序", () => {
+    const subpDir = join(dir, "subprograms")
+    const standalone = readdirSync(subpDir).find(f => f.startsWith("__STANDALONE_FN_ABC_CLASS__."))
+    expect(standalone).toBeDefined()
+    const sp = JSON.parse(readFileSync(join(subpDir, standalone!), "utf-8"))
+    expect(sp.name).toBe("FN_ABC_CLASS")
+    expect(sp.type).toBe("FUNCTION")
+    expect(sp.returnType).toBe("VARCHAR2")
   })
 })

@@ -164,16 +164,18 @@ describe("UPSTREAM_ARTIFACTS", () => {
   })
 
   it("analyze 不注入 inventory-index.json（避免分片 worker 拿到全量包源码路径）", () => {
-    // inventory-index.json 含所有包的 headerFile/bodyFile；analyze 分片 worker 只该从本包
-    // inventory-packages/{PKG}.json 取源码路径，否则会读其他包源码、写出其他包的 FSD。
+    // inventory-index.json 含全部包结构；analyze 分片 worker 只该从本包 packages/{PKG}.json +
+    // subprograms/{PKG}.*.json 取源码路径，否则会读其他包源码、写出其他包的 FSD。
     expect(UPSTREAM_ARTIFACTS.analyze).not.toContain("inventory-index.json")
-    // 本包源码路径来源仍在
-    expect(UPSTREAM_ARTIFACTS.analyze).toContain("inventory-packages/*.json")
+    // 本包源码路径来源仍在（packages + subprograms 按实体落盘）
+    expect(UPSTREAM_ARTIFACTS.analyze).toContain("packages/*.json")
+    expect(UPSTREAM_ARTIFACTS.analyze).toContain("subprograms/*.json")
   })
 
   it("translate 不注入 inventory-index.json（同 analyze 理由）", () => {
     expect(UPSTREAM_ARTIFACTS.translate).not.toContain("inventory-index.json")
-    expect(UPSTREAM_ARTIFACTS.translate).toContain("inventory-packages/*.json")
+    expect(UPSTREAM_ARTIFACTS.translate).toContain("packages/*.json")
+    expect(UPSTREAM_ARTIFACTS.translate).toContain("subprograms/*.json")
     // fsd/*/*.md 在分片模式下由 narrowUpstreamForShard 收窄到 fsd/{pkg}/*.md
     expect(UPSTREAM_ARTIFACTS.translate).toContain("fsd/*/*.md")
   })

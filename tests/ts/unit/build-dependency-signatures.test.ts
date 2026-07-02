@@ -1,12 +1,14 @@
 /**
  * build-dependency-signatures.test.ts — 依赖签名预注入测试（Phase 2 translate）
  *
- * 验证 buildDependencySignaturesBlock 按 callGraph 把本分片 unit 调用的、已完成 unit 的 Java 方法签名
+ * 验证 buildDependencySignaturesBlock 按调用图把本分片 unit 调用的、已完成 unit 的 Java 方法签名
  * 内联到 workOrder；未完成目标标 TODO；第一分片无依赖返回空串。
+ *
+ * 新形状：调用图由 buildDependencyGraph 从 subprograms/*.json 的 directCalls 按需推导（不再读 dependency-graph.json）。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { buildDependencySignaturesBlock } from "@plugins/workflow-engine"
@@ -17,8 +19,22 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "dep-sig-"))
 })
 
-function writeAnalysis(art: string, callGraph: Record<string, string[]>) {
-  writeFileSync(join(art, "dependency-graph.json"), JSON.stringify({ callGraph, functionOwnership: {} }), "utf-8")
+/** 写 subprograms/{pkg}.{name}.json（含 directCalls）+ 兜底 packages/{pkg}.json */
+function writeSub(art: string, pkg: string, name: string, directCalls: Array<{ package: string; name: string; line: number; kind: "function" | "procedure" }> = []) {
+  mkdirSync(join(art, "subprograms"), { recursive: true })
+  mkdirSync(join(art, "packages"), { recursive: true })
+  writeFileSync(join(art, "subprograms", `${pkg}.${name}.json`), JSON.stringify({
+    name, type: "PROCEDURE", belongToPackage: pkg, overloadIndex: null, isPrivate: false,
+    headerLocation: null, bodyLocation: { absolutePath: `${pkg}.sql`, lineRange: [1, 1] },
+    parameters: [], returnType: null, loc: 1, directCalls,
+  }), "utf-8")
+  const p = join(art, "packages", `${pkg}.json`)
+  if (!existsSync(p)) {
+    writeFileSync(p, JSON.stringify({
+      packageName: pkg, absolutePaths: [], headerPath: null, bodyPath: null,
+      constants: [], variables: [], exceptions: [], types: [], functions: [], procedures: [], estimatedLoc: 0,
+    }), "utf-8")
+  }
 }
 
 function writeAggregatedTranslation(art: string, pkg: string, methods: Array<Record<string, unknown>>) {
@@ -32,7 +48,8 @@ describe("buildDependencySignaturesBlock", () => {
   it("跨包已完成依赖：内联真实方法签名", () => {
     const art = join(dir, "a")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_B.other"] })
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_B", name: "other", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_B", "other")
     writeAggregatedTranslation(art, "PKG_B", [
       { oracleName: "other", javaClass: "com.x.BService", javaMethod: "other", javaFile: "src/BService.java" },
     ])
@@ -49,7 +66,8 @@ describe("buildDependencySignaturesBlock", () => {
     const art = join(dir, "b")
     mkdirSync(art, { recursive: true })
     // PKG_A.proc2 调用同包 PKG_A.proc1（prior unit，已完成）
-    writeAnalysis(art, { "PKG_A.proc2": ["PKG_A.proc1"] })
+    writeSub(art, "PKG_A", "proc2", [{ package: "PKG_A", name: "proc1", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_A", "proc1")
     writeAggregatedTranslation(art, "PKG_A", [
       { oracleName: "proc1", javaClass: "com.x.AService", javaMethod: "proc1", javaFile: null },
     ])
@@ -61,7 +79,8 @@ describe("buildDependencySignaturesBlock", () => {
   it("跨包未完成依赖：标 TODO（拓扑序在后的目标）", () => {
     const art = join(dir, "c")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_C.unfinished"] })
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_C", name: "unfinished", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_C", "unfinished")
     // PKG_C 未完成，无聚合 translation.json
 
     const block = buildDependencySignaturesBlock(art, ["PKG_A.proc1"], []) // PKG_C 未在 completed
@@ -73,7 +92,8 @@ describe("buildDependencySignaturesBlock", () => {
   it("已完成包但无匹配子程序签名：标 TODO", () => {
     const art = join(dir, "d")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_B.missing_method"] })
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_B", name: "missing_method", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_B", "missing_method")
     writeAggregatedTranslation(art, "PKG_B", [
       { oracleName: "other", javaClass: "com.x.BService", javaMethod: "other" },
     ])
@@ -83,24 +103,26 @@ describe("buildDependencySignaturesBlock", () => {
     expect(block).toContain("PKG_B.missing_method")
   })
 
-  it("第一分片无依赖（callGraph 空 / 无 callee）→ 返回空串", () => {
+  it("第一分片无依赖（无 callee）→ 返回空串", () => {
     const art = join(dir, "e")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, {})
+    writeSub(art, "PKG_A", "proc1") // 无 directCalls
     expect(buildDependencySignaturesBlock(art, ["PKG_A.proc1"], [])).toBe("")
   })
 
   it("空 targetUnits → 返回空串", () => {
     const art = join(dir, "f")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_B.other"] })
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_B", name: "other", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_B", "other")
     expect(buildDependencySignaturesBlock(art, [], ["PKG_B.other"])).toBe("")
   })
 
-  it("大小写不敏感：callGraph 大小写与 completedUnitIds 不一致仍命中", () => {
+  it("大小写不敏感：directCalls 与 completedUnitIds 大小写不一致仍命中", () => {
     const art = join(dir, "g")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_B.other"] }) // callGraph 大写 PKG_B
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_B", name: "other", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_B", "other")
     writeAggregatedTranslation(art, "PKG_B", [
       { oracleName: "other", javaClass: "com.x.BService", javaMethod: "other" },
     ])
@@ -112,7 +134,8 @@ describe("buildDependencySignaturesBlock", () => {
   it("translation.json 不存在/损坏：该 callee 标 TODO，不抛错", () => {
     const art = join(dir, "h")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { "PKG_A.proc1": ["PKG_B.other"] })
+    writeSub(art, "PKG_A", "proc1", [{ package: "PKG_B", name: "other", line: 1, kind: "procedure" }])
+    writeSub(art, "PKG_B", "other")
     // PKG_B 标记为已完成但聚合文件不存在
     expect(() => buildDependencySignaturesBlock(art, ["PKG_A.proc1"], ["PKG_B.other"])).not.toThrow()
     const block = buildDependencySignaturesBlock(art, ["PKG_A.proc1"], ["PKG_B.other"])

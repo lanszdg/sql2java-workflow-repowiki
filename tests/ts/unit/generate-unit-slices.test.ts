@@ -2,7 +2,10 @@
  * generate-unit-slices.test.ts — 引擎预切 per-unit 切片测试（Phase 1 硬输入边界）
  *
  * 验证 generateUnitSlices 为每个 targetUnit 落盘 source.sql + inventory-slice.json + meta.json，
- * 源码片段按 lineRange 抽取（绝对路径 / 相对 sourcePath / standalone 虚拟包），analysis-slice 容错。
+ * 源码片段按 bodyLocation.lineRange 抽取（绝对路径 / 相对 sourcePath / standalone 虚拟包），analysis-slice 容错。
+ *
+ * 新形状：packages/{pkg}.json + subprograms/{pkg}.{ref}.json（bodyLocation.lineRange）；
+ * functionOwnership 由 buildDependencyGraph 从 subprograms.directCalls 按需推导（不再读 dependency-graph.json）。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
@@ -17,32 +20,46 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "gen-slices-"))
 })
 
-function writeInvPkg(art: string, pkg: string, bodyFile: string, procs: Array<Record<string, unknown>>) {
-  mkdirSync(join(art, "inventory-packages"), { recursive: true })
-  writeFileSync(join(art, "inventory-packages", `${pkg}.json`), JSON.stringify({
-    packageName: pkg, bodyFile, procedures: procs,
-  }), "utf-8")
+interface SubSpec {
+  name: string
+  type: "PROCEDURE" | "FUNCTION"
+  lineRange?: [number, number]
+  directCalls?: Array<{ package: string; name: string; line: number; kind: "function" | "procedure" }>
 }
 
-function writeAnalysis(art: string, opts: Record<string, unknown>) {
-  writeFileSync(join(art, "dependency-graph.json"), JSON.stringify(opts), "utf-8")
+/** 写 packages/{pkg}.json + subprograms/{pkg}.{name}.json（bodyLocation.lineRange = lineRange） */
+function writePkg(art: string, pkg: string, bodyPath: string, subs: SubSpec[]) {
+  mkdirSync(join(art, "packages"), { recursive: true })
+  mkdirSync(join(art, "subprograms"), { recursive: true })
+  const procedures = subs.filter(s => s.type === "PROCEDURE").map(s => s.name)
+  const functions = subs.filter(s => s.type === "FUNCTION").map(s => s.name)
+  writeFileSync(join(art, "packages", `${pkg}.json`), JSON.stringify({
+    packageName: pkg, absolutePaths: [bodyPath], headerPath: bodyPath, bodyPath,
+    constants: [], variables: [], exceptions: [], types: [],
+    functions, procedures, estimatedLoc: 0,
+  }), "utf-8")
+  for (const s of subs) {
+    const loc = s.lineRange ? { absolutePath: bodyPath, lineRange: s.lineRange } : null
+    writeFileSync(join(art, "subprograms", `${pkg}.${s.name}.json`), JSON.stringify({
+      name: s.name, type: s.type, belongToPackage: pkg, overloadIndex: null, isPrivate: false,
+      headerLocation: loc, bodyLocation: loc,
+      parameters: [], returnType: s.type === "FUNCTION" ? "VARCHAR2" : null, loc: 1,
+      directCalls: s.directCalls ?? [],
+    }), "utf-8")
+  }
 }
 
 describe("generateUnitSlices — analyze", () => {
-  it("根 + cargo：source.sql 按 lineRange 抽片段 + inventory-slice.json + meta.json", () => {
+  it("根 + cargo：source.sql 按 bodyLocation.lineRange 抽片段 + inventory-slice.json + meta.json", () => {
     const art = join(dir, "a")
     mkdirSync(art, { recursive: true })
     // 源码文件：10 行 proc1，30-40 行 calc_total
     const src = join(art, "PKG_A_BODY.sql")
     writeFileSync(src, Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n"), "utf-8")
-    writeAnalysis(art, {
-      procedureOrder: [["PKG_A.proc1"]],
-      functionOwnership: { "PKG_A.calc_total": "PKG_A.proc1" },
-      callGraph: {},
-    })
-    writeInvPkg(art, "PKG_A", src, [
-      { name: "proc1", lineRange: [10, 20], type: "PROCEDURE" },
-      { name: "calc_total", lineRange: [30, 40], type: "FUNCTION" },
+    // proc1 调 calc_total（FUNCTION）→ buildDependencyGraph 推导 calc_total 归属 proc1（cargo）
+    writePkg(art, "PKG_A", src, [
+      { name: "proc1", type: "PROCEDURE", lineRange: [10, 20], directCalls: [{ package: "PKG_A", name: "calc_total", line: 12, kind: "function" }] },
+      { name: "calc_total", type: "FUNCTION", lineRange: [30, 40] },
     ])
 
     const generated = generateUnitSlices(art, ["PKG_A.proc1"], "analyze", "")
@@ -75,14 +92,15 @@ describe("generateUnitSlices — analyze", () => {
     expect(meta.analysisMissing).toBe(false)
   })
 
-  it("相对 bodyFile + sourcePath → 用绝对路径抽源码", () => {
+  it("相对 bodyPath + sourcePath → 用绝对路径抽源码", () => {
     const art = join(dir, "b")
     mkdirSync(art, { recursive: true })
     const sourcePath = art // 源码就放在 art 下
     mkdirSync(join(sourcePath, "subdir"), { recursive: true })
     writeFileSync(join(sourcePath, "subdir", "BODY.sql"), Array.from({ length: 20 }, (_, i) => `L${i + 1}`).join("\n"), "utf-8")
-    writeAnalysis(art, { procedureOrder: [["PKG_A.proc1"]], functionOwnership: {}, callGraph: {} })
-    writeInvPkg(art, "PKG_A", "subdir/BODY.sql", [{ name: "proc1", lineRange: [5, 9] }])
+    writePkg(art, "PKG_A", "subdir/BODY.sql", [
+      { name: "proc1", type: "PROCEDURE", lineRange: [5, 9] },
+    ])
 
     generateUnitSlices(art, ["PKG_A.proc1"], "analyze", sourcePath)
     const sql = readFileSync(join(art, "shard-inputs", "PKG_A", "proc1", "source.sql"), "utf-8")
@@ -91,14 +109,14 @@ describe("generateUnitSlices — analyze", () => {
     expect(sql).not.toContain("L10")
   })
 
-  it("standalone 虚拟包：bodyFile=源文件，切片正常", () => {
+  it("standalone 虚拟包：bodyPath=源文件，切片正常", () => {
     const art = join(dir, "c")
     mkdirSync(art, { recursive: true })
     const src = join(art, "standalone_proc.sql")
     writeFileSync(src, Array.from({ length: 8 }, (_, i) => `s${i + 1}`).join("\n"), "utf-8")
-    writeAnalysis(art, { procedureOrder: [["__STANDALONE_X__.do_thing"]], functionOwnership: {}, callGraph: {} })
-    // standalone 包：bodyFile 即源文件
-    writeInvPkg(art, "__STANDALONE_X__", src, [{ name: "do_thing", lineRange: [2, 6] }])
+    writePkg(art, "__STANDALONE_X__", src, [
+      { name: "do_thing", type: "PROCEDURE", lineRange: [2, 6] },
+    ])
 
     generateUnitSlices(art, ["__STANDALONE_X__.do_thing"], "analyze", "")
     const sql = readFileSync(join(art, "shard-inputs", "__STANDALONE_X__", "do_thing", "source.sql"), "utf-8")
@@ -110,8 +128,9 @@ describe("generateUnitSlices — analyze", () => {
   it("lineRange 缺失：source.sql 标注警告，不抛错", () => {
     const art = join(dir, "d")
     mkdirSync(art, { recursive: true })
-    writeAnalysis(art, { procedureOrder: [["PKG_A.proc1"]], functionOwnership: {}, callGraph: {} })
-    writeInvPkg(art, "PKG_A", "/nonexistent/BODY.sql", [{ name: "proc1" /* 无 lineRange */ }])
+    writePkg(art, "PKG_A", "/nonexistent/BODY.sql", [
+      { name: "proc1", type: "PROCEDURE" /* 无 lineRange */ },
+    ])
 
     expect(() => generateUnitSlices(art, ["PKG_A.proc1"], "analyze", "")).not.toThrow()
     const sql = readFileSync(join(art, "shard-inputs", "PKG_A", "proc1", "source.sql"), "utf-8")
@@ -125,14 +144,9 @@ describe("generateUnitSlices — translate", () => {
     mkdirSync(art, { recursive: true })
     const src = join(art, "BODY.sql")
     writeFileSync(src, Array.from({ length: 20 }, (_, i) => `x${i + 1}`).join("\n"), "utf-8")
-    writeAnalysis(art, {
-      procedureOrder: [["PKG_A.proc1"], ["PKG_A.proc2"]],
-      functionOwnership: {},
-      callGraph: {},
-    })
-    writeInvPkg(art, "PKG_A", src, [
-      { name: "proc1", lineRange: [1, 5] },
-      { name: "proc2", lineRange: [6, 10] },
+    writePkg(art, "PKG_A", src, [
+      { name: "proc1", type: "PROCEDURE", lineRange: [1, 5] },
+      { name: "proc2", type: "PROCEDURE", lineRange: [6, 10] },
     ])
     // 聚合 analysis-packages（含两个 subprogram，结构不同以便区分）
     mkdirSync(join(art, "analysis-packages"), { recursive: true })
@@ -160,8 +174,9 @@ describe("generateUnitSlices — translate", () => {
     mkdirSync(art, { recursive: true })
     const src = join(art, "BODY.sql")
     writeFileSync(src, Array.from({ length: 10 }, (_, i) => `y${i + 1}`).join("\n"), "utf-8")
-    writeAnalysis(art, { procedureOrder: [["PKG_A.proc1"]], functionOwnership: {}, callGraph: {} })
-    writeInvPkg(art, "PKG_A", src, [{ name: "proc1", lineRange: [1, 5] }])
+    writePkg(art, "PKG_A", src, [
+      { name: "proc1", type: "PROCEDURE", lineRange: [1, 5] },
+    ])
     // 不写 analysis-packages 聚合
 
     generateUnitSlices(art, ["PKG_A.proc1"], "translate", "")

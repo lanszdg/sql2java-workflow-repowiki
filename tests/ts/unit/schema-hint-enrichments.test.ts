@@ -27,7 +27,7 @@ describe("REFINE_CONSTRAINTS 一致性", () => {
   // 从 artifact-schemas.ts 中提取的 refine message 列表
   const EXPECTED_REFINE_MESSAGES: Record<string, string[]> = {
     inventory: [
-      "有 procedures 的包必须有非空的 bodyFile",
+      "有子程序的包应有 bodyPath",
     ],
     translate: [
       "subprogramMethods.oracleName 必须唯一",
@@ -192,11 +192,11 @@ describe("COMMON_PITFALLS 一致性", () => {
     }
   })
 
-  it("inventory 阶段包含 direction 大写提示", () => {
+  it("inventory 阶段包含 mode 大写提示", () => {
     const pitfalls = COMMON_PITFALLS["inventory"]
     expect(pitfalls).toBeDefined()
-    const hasDirection = pitfalls!.some(p => p.includes("direction") && p.includes("IN"))
-    expect(hasDirection, "inventory pitfall 应包含 direction 大写提示").toBe(true)
+    const hasMode = pitfalls!.some(p => p.includes("mode") && p.includes("IN"))
+    expect(hasMode, "inventory pitfall 应包含 mode 大写提示").toBe(true)
   })
 
   it("inventory 阶段包含 optional 不写 null 提示", () => {

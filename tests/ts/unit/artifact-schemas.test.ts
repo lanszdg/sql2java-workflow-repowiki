@@ -19,6 +19,9 @@ import {
   VerifySummarySchema,
   DedupSchema,
   FixArtifactSchema,
+  PackageArtifactSchema,
+  SubprogramArtifactSchema,
+  TableArtifactSchema,
   getSchemaForPhase,
   getPerPackageSchema,
   getSummarySchema,
@@ -77,8 +80,7 @@ describe("Schema 有效数据通过校验", () => {
     const data = {
       sourcePath: "/test",
       packageNames: ["CORE_PKG"],
-      tables: [],
-      standaloneProcedures: [],
+      tableNames: ["T_ITEM"],
       triggers: [],
       views: [],
       sequences: [],
@@ -591,21 +593,13 @@ describe("类型放松 — 合理 LLM 变体不再被拒", () => {
     expect(InventoryPackageSchema.safeParse(data).success).toBe(true)
   })
 
-  it("InventorySchema: defaultValue=null → 通过", () => {
+  it("TableArtifactSchema: defaultValue=null → 通过", () => {
     const data = {
-      sourcePath: "/test",
-      packageNames: ["X"],
-      tables: [{
-        name: "T",
-        ddlFile: null,
-        columns: [{ name: "C", oracleType: "NUM", nullable: true, isPrimaryKey: false, defaultValue: null }],
-      }],
-      standaloneProcedures: [],
-      triggers: [],
-      views: [],
-      sequences: [],
+      name: "T",
+      ddlFile: "t.sql",
+      columns: [{ name: "C", oracleType: "NUM", nullable: true, isPrimaryKey: false, defaultValue: null }],
     }
-    expect(InventorySchema.safeParse(data).success).toBe(true)
+    expect(TableArtifactSchema.safeParse(data).success).toBe(true)
   })
 
   it("VerifySummarySchema: errors=[] + success=false → 通过", () => {
@@ -813,8 +807,7 @@ describe("大小写 normalize — ciEnum 自动纠正 LLM 大小写变体", () =
     const data = {
       sourcePath: "/test",
       packageNames: ["PKG"],
-      tables: [],
-      standaloneProcedures: [],
+      tableNames: [],
       triggers: [{
         name: "TRG",
         timing: "BEFORE",
@@ -836,30 +829,26 @@ describe("大小写 normalize — ciEnum 自动纠正 LLM 大小写变体", () =
     }
   })
 
-  // ── direction 在 InventorySchema.standaloneProcedures ────
+  // ── mode 在 SubprogramArtifactSchema.parameters（原 InventorySchema.standaloneProcedures.direction）──
 
-  it("InventorySchema: standaloneProcedures direction 'out' normalize 为 'OUT'", () => {
+  it("SubprogramArtifactSchema: parameters mode 'out' normalize 为 'OUT'", () => {
     const data = {
-      sourcePath: "/test",
-      packageNames: ["PKG"],
-      tables: [],
-      standaloneProcedures: [{
-        name: "SP",
-        type: "Procedure",
-        params: [{ name: "X", oracleType: "NUMBER", direction: "out" }],
-        returnType: null,
-        sourceFile: "sp.sql",
-        lineRange: [1, 10] as [number, number],
-      }],
-      triggers: [],
-      views: [],
-      sequences: [],
+      name: "SP",
+      type: "PROCEDURE",
+      belongToPackage: "PKG",
+      overloadIndex: null,
+      isPrivate: false,
+      headerLocation: null,
+      bodyLocation: { absolutePath: "sp.sql", lineRange: [1, 10] as [number, number] },
+      parameters: [{ name: "X", type: "NUMBER", mode: "out", defaultExpression: null }],
+      returnType: null,
+      loc: 10,
+      directCalls: [],
     }
-    const result = InventorySchema.safeParse(data)
+    const result = SubprogramArtifactSchema.safeParse(data)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.standaloneProcedures[0].type).toBe("procedure")
-      expect(result.data.standaloneProcedures[0].params[0].direction).toBe("OUT")
+      expect(result.data.parameters[0].mode).toBe("OUT")
     }
   })
 })

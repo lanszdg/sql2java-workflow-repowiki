@@ -49,7 +49,6 @@ describe("PHASE_PREREQUISITES 关键前置项", () => {
     const review = PHASE_PREREQUISITES.review!
     expect(review).toContain("plan.json")
     expect(review).toContain("scaffold.json")
-    expect(review).toContain("dependency-graph.json")
     expect(review).toContain("analysis-packages")
   })
 
@@ -61,9 +60,10 @@ describe("PHASE_PREREQUISITES 关键前置项", () => {
 
   it("translate 依赖 inventory + analysis + plan + scaffold", () => {
     const translate = PHASE_PREREQUISITES.translate!
-    expect(translate).toContain("inventory-index.json")
     expect(translate).toContain("inventory.json")
-    expect(translate).toContain("dependency-graph.json")
+    expect(translate).toContain("packages")
+    expect(translate).toContain("subprograms")
+    expect(translate).toContain("analysis-packages")
     expect(translate).toContain("plan.json")
     expect(translate).toContain("scaffold.json")
   })

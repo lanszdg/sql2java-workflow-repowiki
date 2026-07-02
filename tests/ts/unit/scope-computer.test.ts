@@ -50,8 +50,8 @@ describe("parseMainEntry", () => {
 
 const ENTRY_PKG: InventoryPackageLike = {
   packageName: "ORDER_PKG",
-  bodyFile: "subdir1/order_pkg_body.sql",
-  headerFile: "subdir1/order_pkg_spec.sql",
+  bodyPath: "subdir1/order_pkg_body.sql",
+  headerPath: "subdir1/order_pkg_spec.sql",
   procedures: [
     { name: "process_order", type: "PROCEDURE" },
     { name: "calc_total", type: "FUNCTION" },
