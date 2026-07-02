@@ -23,7 +23,7 @@ interface SubprogramFile {
   directCalls: { package: string; name: string; line: number; kind: "function" | "procedure" }[]
 }
 
-interface RefIndexEntry {
+export interface RefIndexEntry {
   /** 本包子程序（含 refName / type），顺序与文件 encounter 一致 */
   subprograms: { name: string; refName: string; type: "procedure" | "function" }[]
   /** 大写裸名 → 该名的所有 refName（重载多版本） */

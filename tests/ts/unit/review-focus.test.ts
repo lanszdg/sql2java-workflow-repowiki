@@ -35,18 +35,29 @@ beforeAll(() => {
   ].join("\n")
   writeFileSync(join(sourcePath, "pkg_a_body.sql"), body)
 
-  // inventory-packages/PKG_A.json
-  mkdirSync(join(dir, "inventory-packages"), { recursive: true })
-  writeFileSync(join(dir, "inventory-packages", "PKG_A.json"), JSON.stringify({
-    packageName: "PKG_A",
-    bodyFile: "pkg_a_body.sql",
-    procedures: [
-      { name: "get_item", type: "procedure", params: [], lineRange: [1, 4] },
-      { name: "update_status", type: "procedure", params: [{ name: "p_code", oracleType: "VARCHAR2", direction: "OUT" }], lineRange: [5, 6] },
-      { name: "create_order", type: "procedure", params: [], lineRange: [7, 8] },
-      { name: "simple_crud", type: "procedure", params: [], lineRange: [9, 10] },
-    ],
-  }))
+  // packages/PKG_A.json + subprograms/PKG_A.*.json（bodyLocation.lineRange + parameters.mode）
+  mkdirSync(join(dir, "packages"), { recursive: true })
+  mkdirSync(join(dir, "subprograms"), { recursive: true })
+  const subs = [
+    { name: "get_item", lineRange: [1, 4], params: [] },
+    { name: "update_status", lineRange: [5, 6], params: [{ name: "p_code", type: "VARCHAR2", mode: "OUT" }] },
+    { name: "create_order", lineRange: [7, 8], params: [] },
+    { name: "simple_crud", lineRange: [9, 10], params: [] },
+  ]
+  writeFileSync(join(dir, "packages", "PKG_A.json"), JSON.stringify({
+    packageName: "PKG_A", absolutePaths: ["pkg_a_body.sql"], headerPath: "pkg_a_body.sql", bodyPath: "pkg_a_body.sql",
+    constants: [], variables: [], exceptions: [], types: [],
+    functions: [], procedures: subs.map(s => s.name), estimatedLoc: 10,
+    // complexity 现为包级（原 dependency-graph.json.complexity 迁此）；PKG_A 整体 low
+    complexity: { score: 3, patterns: [], riskLevel: "low" },
+  }), "utf-8")
+  for (const s of subs) {
+    writeFileSync(join(dir, "subprograms", `PKG_A.${s.name}.json`), JSON.stringify({
+      name: s.name, type: "PROCEDURE", belongToPackage: "PKG_A", overloadIndex: null, isPrivate: false,
+      headerLocation: null, bodyLocation: { absolutePath: "pkg_a_body.sql", lineRange: s.lineRange },
+      parameters: s.params, returnType: null, loc: 1, directCalls: [],
+    }), "utf-8")
+  }
 
   // analysis-packages/PKG_A.json（cursors / exceptionHandlers）
   mkdirSync(join(dir, "analysis-packages"), { recursive: true })
@@ -60,21 +71,11 @@ beforeAll(() => {
     ],
   }))
 
-  // dependency-graph.json（complexity：create_order high → #1）
-  writeFileSync(join(dir, "dependency-graph.json"), JSON.stringify({
-    packageNames: ["PKG_A"],
-    complexity: {
-      "PKG_A.create_order": { score: 8, patterns: ["nested-if"], riskLevel: "high" },
-      "PKG_A.get_item": { score: 3, patterns: [], riskLevel: "low" },
-    },
-    callGraph: {}, packageDependency: {}, translationOrder: [["PKG_A"]], sccGroups: [],
-  }))
-
-  // plan.json
+  // plan.json（manualReviewList：create_order → #1 logic-equivalence；complexity 包级已 low）
   writeFileSync(join(dir, "plan.json"), JSON.stringify({
     targetProject: { groupId: "com.x", artifactId: "app", packageBase: "com.x", javaVersion: "1.8", springBootVersion: "2.7" },
     packageMappings: [{ oraclePackage: "PKG_A", javaPackage: "com.x", mapperInterface: "FooMapper", accessIntf: "FooAccessIntf", accessImpl: "FooAccessImpl", processor: "FooProcessor", aggregate: "FooAggregate", builder: "FooBuilder", validator: "FooValidator" }],
-    rules: {}, typeMappings: {}, manualReviewList: [], conventions: "",
+    rules: {}, typeMappings: {}, manualReviewList: [{ procedure: "create_order" }], conventions: "",
   }))
 
   // translations/PKG_A/translation.json（subprogramMethods → Java 锚点）

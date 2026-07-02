@@ -14,18 +14,30 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { validateFsds } from "@plugins/workflow-engine"
+import { refNamesForPackage } from "@workflow/refname"
 
 function setupArtifacts(dir: string, packages: Array<{ name: string; procedures: Array<{ name: string }> }>) {
-  mkdirSync(join(dir, "inventory-packages"), { recursive: true })
+  mkdirSync(join(dir, "packages"), { recursive: true })
+  mkdirSync(join(dir, "subprograms"), { recursive: true })
   mkdirSync(join(dir, "fsd"), { recursive: true })
   writeFileSync(join(dir, "inventory.json"), JSON.stringify({
     sourcePath: "/src", packageNames: packages.map(p => p.name),
   }), "utf-8")
   for (const p of packages) {
-    writeFileSync(join(dir, "inventory-packages", `${p.name}.json`), JSON.stringify({
-      packageName: p.name,
-      procedures: p.procedures,
+    const names = p.procedures.map(pr => pr.name)
+    const refNames = refNamesForPackage(names)
+    writeFileSync(join(dir, "packages", `${p.name}.json`), JSON.stringify({
+      packageName: p.name, absolutePaths: [], headerPath: null, bodyPath: null,
+      constants: [], variables: [], exceptions: [], types: [],
+      functions: [], procedures: names, estimatedLoc: 0,
     }), "utf-8")
+    for (let i = 0; i < names.length; i++) {
+      writeFileSync(join(dir, "subprograms", `${p.name}.${refNames[i]}.json`), JSON.stringify({
+        name: names[i], type: "PROCEDURE", belongToPackage: p.name, overloadIndex: null, isPrivate: false,
+        headerLocation: null, bodyLocation: { absolutePath: `${p.name}.sql`, lineRange: [1, 1] },
+        parameters: [], returnType: null, loc: 1, directCalls: [],
+      }), "utf-8")
+    }
   }
 }
 

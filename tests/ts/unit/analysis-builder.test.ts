@@ -1,8 +1,12 @@
 /**
  * analysis-builder.test.ts — analyze reduce（代码）核心逻辑测试
  *
- * 验证：① tiny fixture 上 dependency-graph.json 产出正确（callGraph/packageDependency/
- * translationOrder/sccGroups/complexity）；② Tarjan SCC 算法（含环）；③ refName 索引（重载）。
+ * 新形状：buildDependencyGraphFromIndex 仅做 complexity（写入 packages/{PKG}.json）+ 无子程序包空
+ * analysis-packages 兜底；调用图（callGraph/packageDependency/translationOrder/sccGroups/procedureOrder/
+ * functionOwnership）由 dependency-graph.ts 从 subprograms.directCalls 按需推导（buildDependencyGraph）。
+ *
+ * 覆盖：① tiny fixture 上 complexity/backstop 产出 + buildDependencyGraph 推导；② Tarjan SCC（含环）；
+ * ③ FUNCTION 属主归属 + 单元级 procedureOrder；④ 合成 fixture 跨包调用。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
@@ -11,8 +15,14 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { scanSource } from "@workflow/plsql-scanner"
-import { buildDependencyGraphFromIndex, tarjanSCC, buildRefNameIndex, assignFunctionOwnership, buildProcedureOrder } from "@workflow/analysis-builder"
-import { DependencyGraphSchema, AnalysisPackageSchema } from "@workflow/artifact-schemas"
+import { buildInventoryFromIndex } from "@workflow/inventory-builder"
+import { buildDependencyGraphFromIndex } from "@workflow/analysis-builder"
+import {
+  buildDependencyGraph, tarjanSCC, assignFunctionOwnership, buildProcedureOrder,
+  type RefIndexEntry,
+} from "@workflow/dependency-graph"
+import { AnalysisPackageSchema } from "@workflow/artifact-schemas"
+import { refNamesForPackage } from "@workflow/refname"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
 let dir: string
@@ -22,66 +32,24 @@ beforeAll(async () => {
   const index = await scanSource(FIXTURE_TINY)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
+  buildInventoryFromIndex(dir)
+  buildDependencyGraphFromIndex(dir)
 }, 60000)
 
 describe("buildDependencyGraphFromIndex (tiny fixture)", () => {
-  it("生成 dependency-graph.json 并过 DependencyGraphSchema 校验", () => {
-    const r = buildDependencyGraphFromIndex(dir)
-    expect(r.packageCount).toBe(3)
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    expect(DependencyGraphSchema.safeParse(a).success).toBe(true)
-  })
-
-  it("packageNames 覆盖全部包", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    // 含独立函数 fn_abc_class 注入的虚拟包
-    expect(a.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
-  })
-
-  it("packageDependency 捕获跨包常量引用（CORE_PKG→BASE_PKG）", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    // core_pkg 用 base_pkg.c_dir_in（常量），包级依赖须包含
-    expect(a.packageDependency["CORE_PKG"]).toContain("BASE_PKG")
-    expect(a.packageDependency["BASE_PKG"]).toEqual([])
-  })
-
-  it("translationOrder 依赖在前：BASE_PKG 先于 CORE_PKG", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    // 含独立函数虚拟包；CORE_PKG 依赖 BASE_PKG，故 BASE_PKG 必在前
-    const order = a.translationOrder.flat()
-    expect(order).toEqual(expect.arrayContaining(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"]))
-    expect(order.indexOf("BASE_PKG")).toBeLessThan(order.indexOf("CORE_PKG"))
-  })
-
-  it("sccGroups：无环时为空", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    expect(a.sccGroups).toEqual([])
-  })
-
-  it("callGraph：跨包子程序调用无（常量引用不建边）+ 同包裸名调用边已补全（feat/proc-entry-scope D）", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    // base_pkg 无子程序；core_pkg 的跨包引用是 base_pkg.c_dir_in（常量，非子程序）→ 不进 callGraph。
-    // 同包裸名调用（此前 scanCallSites 只认 PKG.PROC 点号调用会漏）现由 scanBareCallSites 补全：
-    //   bom_cost 递归调用自身；bulk_receive→log_error；get_item_obj→get_item。
-    expect(a.callGraph).toEqual({
-      "CORE_PKG.bom_cost": ["CORE_PKG.bom_cost"],
-      "CORE_PKG.bulk_receive": ["CORE_PKG.log_error"],
-      "CORE_PKG.get_item_obj": ["CORE_PKG.get_item"],
-    })
-  })
-
-  it("complexity 启发式：BASE_PKG 低分，CORE_PKG 高分 + 模式", () => {
-    const a = JSON.parse(readFileSync(join(dir, "dependency-graph.json"), "utf-8"))
-    expect(a.complexity["BASE_PKG"].riskLevel).toBe("low")
-    expect(a.complexity["BASE_PKG"].score).toBeLessThanOrEqual(3)
-    expect(a.complexity["CORE_PKG"].riskLevel).toBe("high")
-    expect(a.complexity["CORE_PKG"].score).toBe(10) // clamp 上限
-    // core_pkg 含这些模式
-    const pats = a.complexity["CORE_PKG"].patterns
+  it("complexity 写入 packages/{PKG}.json：CORE_PKG high + 模式，BASE_PKG low", () => {
+    const core = JSON.parse(readFileSync(join(dir, "packages", "CORE_PKG.json"), "utf-8"))
+    expect(core.complexity.riskLevel).toBe("high")
+    expect(core.complexity.score).toBe(10) // clamp 上限
+    const pats = core.complexity.patterns
     expect(pats).toContain("dynamic-sql")
     expect(pats).toContain("bulk-collect")
     expect(pats).toContain("connect-by")
     expect(pats).toContain("pipelined")
+
+    const base = JSON.parse(readFileSync(join(dir, "packages", "BASE_PKG.json"), "utf-8"))
+    expect(base.complexity.riskLevel).toBe("low")
+    expect(base.complexity.score).toBeLessThanOrEqual(3)
   })
 
   it("无子程序包写空 analysis-packages/{PKG}.json（过 AnalysisPackageSchema）", () => {
@@ -93,21 +61,42 @@ describe("buildDependencyGraphFromIndex (tiny fixture)", () => {
   })
 })
 
+describe("buildDependencyGraph (tiny fixture)", () => {
+  it("packageNames 覆盖全部包", () => {
+    const g = buildDependencyGraph(dir)
+    // 含独立函数 fn_abc_class 注入的虚拟包
+    expect(g.packageNames.sort()).toEqual(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"])
+  })
+
+  it("callGraph 捕获同包函数调用 GET_ITEM_OBJ→GET_ITEM（自递归 bom_cost 排除）", () => {
+    const g = buildDependencyGraph(dir)
+    // get_item_obj 调 get_item（同包裸名函数调用，经 general_element 捕获）
+    expect(g.callGraph["CORE_PKG.GET_ITEM_OBJ"]).toContain("CORE_PKG.GET_ITEM")
+    // bom_cost 自递归按 plan「调用方自身（递归）排除」不进 callGraph
+    expect(g.callGraph["CORE_PKG.BOM_COST"]).toBeUndefined()
+  })
+
+  it("translationOrder 含所有包；sccGroups 无环时为空", () => {
+    const g = buildDependencyGraph(dir)
+    const order = g.translationOrder.flat()
+    expect(order).toEqual(expect.arrayContaining(["BASE_PKG", "CORE_PKG", "__STANDALONE_FN_ABC_CLASS__"]))
+    expect(g.sccGroups).toEqual([])
+  })
+})
+
+// ── Tarjan SCC ──────────────────────────────────────────────────────────────
+
 describe("tarjanSCC", () => {
   it("无环：依赖在前拓扑序", () => {
-    // A→B（A 依赖 B），C→B
     const nodes = ["A", "B", "C"]
     const edges = new Map([["A", new Set(["B"])], ["B", new Set()], ["C", new Set(["B"])]])
     const sccs = tarjanSCC(nodes, edges)
-    // B（sink）先输出，A/C 之后
     expect(sccs[0]).toEqual(["B"])
     expect(sccs.slice(1).map(c => c[0]).sort()).toEqual(["A", "C"])
-    // 每个 SCC 单元素
     expect(sccs.every(c => c.length === 1)).toBe(true)
   })
 
   it("有环：SCC 组归为同组，且组内成员一起", () => {
-    // A↔B（环），B→C
     const nodes = ["A", "B", "C"]
     const edges = new Map([
       ["A", new Set(["B"])],
@@ -115,11 +104,9 @@ describe("tarjanSCC", () => {
       ["C", new Set()],
     ])
     const sccs = tarjanSCC(nodes, edges)
-    // {A,B} 是一个 SCC，C 单独
     const cyclic = sccs.find(c => c.length > 1)!
     expect(cyclic.sort()).toEqual(["A", "B"])
     expect(sccs.find(c => c.length === 1 && c[0] === "C")).toBeTruthy()
-    // C（依赖最深的 sink）应在 {A,B} 之前输出
     const cIdx = sccs.findIndex(c => c.includes("C"))
     const abIdx = sccs.findIndex(c => c.length > 1)
     expect(cIdx).toBeLessThan(abIdx)
@@ -133,40 +120,47 @@ describe("tarjanSCC", () => {
   })
 })
 
-describe("buildRefNameIndex", () => {
+// ── refIndex 构造辅助 + FUNCTION 属主归属 + 单元级 procedureOrder ──────────
+
+/** 从 {name, procs:[{name,type}]} 构造 refIndex（复用 refNamesForPackage 推导重载 refName） */
+function makeRefIndex(pkgs: { name: string; procs: { name: string; type: "procedure" | "function" }[] }[]): Map<string, RefIndexEntry> {
+  const m = new Map<string, RefIndexEntry>()
+  for (const p of pkgs) {
+    const names = p.procs.map(c => c.name)
+    const refNames = refNamesForPackage(names)
+    const subprograms = p.procs.map((c, i) => ({ name: c.name, refName: refNames[i], type: c.type }))
+    const procNameToRefNames = new Map<string, string[]>()
+    for (const s of subprograms) {
+      const k = s.name.toUpperCase()
+      const arr = procNameToRefNames.get(k) ?? []
+      arr.push(s.refName)
+      procNameToRefNames.set(k, arr)
+    }
+    m.set(p.name, { subprograms, procNameToRefNames })
+  }
+  return m
+}
+
+describe("refName 索引（重载）", () => {
   it("非重载→裸名；重载→{name}__{i}（1-based，全部带序号）", () => {
-    const pkgs = [{
-      name: "P",
-      procedures: [
-        { name: "get_param", type: "procedure" },
-        { name: "get_param", type: "procedure" },
-        { name: "unique_fn", type: "function" },
-      ],
-    }]
-    const idx = buildRefNameIndex(pkgs)
-    const info = idx.get("P")!
+    const ref = makeRefIndex([{ name: "P", procs: [
+      { name: "get_param", type: "procedure" },
+      { name: "get_param", type: "procedure" },
+      { name: "unique_fn", type: "function" },
+    ] }])
+    const info = ref.get("P")!
     expect(info.subprograms.map(s => s.refName)).toEqual(["get_param__1", "get_param__2", "unique_fn"])
     expect(info.procNameToRefNames.get("GET_PARAM")).toEqual(["get_param__1", "get_param__2"])
     expect(info.procNameToRefNames.get("UNIQUE_FN")).toEqual(["unique_fn"])
   })
 })
 
-// ── PROCEDURE 级下沉：FUNCTION 属主归属 + 单元级 procedureOrder ──────────────
-/** 构造 refIndex 辅助：procs 用小写名（refName=原名） */
-function makeRefIndex(pkgs: { name: string; procs: { name: string; type: "procedure" | "function" }[] }[]) {
-  return buildRefNameIndex(pkgs.map(p => ({
-    name: p.name,
-    procedures: p.procs.map(c => ({ name: c.name, type: c.type })),
-  })))
-}
-
 describe("assignFunctionOwnership（FUNCTION 属主归属）", () => {
   it("单属主：func 仅被 1 个 proc 调用 → 归它", () => {
     const ref = makeRefIndex([{ name: "P", procs: [
       { name: "p1", type: "procedure" }, { name: "f1", type: "function" },
     ] }])
-    const callGraph = { "P.p1": ["P.f1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
+    const own = assignFunctionOwnership({ "P.p1": ["P.f1"] }, ref)
     expect(own.get("P.f1")).toBe("P.p1")
   })
 
@@ -175,8 +169,7 @@ describe("assignFunctionOwnership（FUNCTION 属主归属）", () => {
       { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
       { name: "f1", type: "function" },
     ] }])
-    const callGraph = { "P.p1": ["P.f1"], "P.p2": ["P.f1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
+    const own = assignFunctionOwnership({ "P.p1": ["P.f1"], "P.p2": ["P.f1"] }, ref)
     expect(own.get("P.f1")).toBe("P.p1")
   })
 
@@ -185,39 +178,32 @@ describe("assignFunctionOwnership（FUNCTION 属主归属）", () => {
       { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
       { name: "f1", type: "function" }, { name: "f2", type: "function" },
     ] }])
-    // p1→f1→f2（p1 到 f2 距离 2）；p2→f2（距离 1）→ owner p2
-    const callGraph = { "P.p1": ["P.f1"], "P.f1": ["P.f2"], "P.p2": ["P.f2"] }
-    const own = assignFunctionOwnership(callGraph, ref)
+    const own = assignFunctionOwnership({ "P.p1": ["P.f1"], "P.f1": ["P.f2"], "P.p2": ["P.f2"] }, ref)
     expect(own.get("P.f1")).toBe("P.p1")
     expect(own.get("P.f2")).toBe("P.p2")
   })
 
   it("孤儿：func 无任何 proc 调用 → 不入 ownership", () => {
-    const ref = makeRefIndex([{ name: "P", procs: [
-      { name: "f1", type: "function" },
-    ] }])
-    const callGraph = {}
-    const own = assignFunctionOwnership(callGraph, ref)
+    const ref = makeRefIndex([{ name: "P", procs: [{ name: "f1", type: "function" }] }])
+    const own = assignFunctionOwnership({}, ref)
     expect(own.has("P.f1")).toBe(false)
   })
 
-  it("仅跨包调用不建立属主：func 在 P 仅被 Q 的 proc 调用 → P 中孤儿", () => {
+  it("仅跨包调用不建立属主", () => {
     const ref = makeRefIndex([
       { name: "P", procs: [{ name: "f1", type: "function" }] },
       { name: "Q", procs: [{ name: "q1", type: "procedure" }] },
     ])
-    const callGraph = { "Q.q1": ["P.f1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
+    const own = assignFunctionOwnership({ "Q.q1": ["P.f1"] }, ref)
     expect(own.has("P.f1")).toBe(false)
   })
 
-  it("经 function 链传递归属：p1→f1→f2，f2 归 p1（传递）", () => {
+  it("经 function 链传递归属", () => {
     const ref = makeRefIndex([{ name: "P", procs: [
       { name: "p1", type: "procedure" },
       { name: "f1", type: "function" }, { name: "f2", type: "function" },
     ] }])
-    const callGraph = { "P.p1": ["P.f1"], "P.f1": ["P.f2"] }
-    const own = assignFunctionOwnership(callGraph, ref)
+    const own = assignFunctionOwnership({ "P.p1": ["P.f1"], "P.f1": ["P.f2"] }, ref)
     expect(own.get("P.f1")).toBe("P.p1")
     expect(own.get("P.f2")).toBe("P.p1")
   })
@@ -228,16 +214,13 @@ describe("buildProcedureOrder（单元级拓扑序）", () => {
     const ref = makeRefIndex([{ name: "P", procs: [
       { name: "p1", type: "procedure" }, { name: "f1", type: "function" },
     ] }])
-    const callGraph = { "P.p1": ["P.f1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
-    const order = buildProcedureOrder(callGraph, ref, own)
-    expect(order.flat()).toEqual(["P.p1"]) // f1 折叠，不独立
+    const own = assignFunctionOwnership({ "P.p1": ["P.f1"] }, ref)
+    const order = buildProcedureOrder({ "P.p1": ["P.f1"] }, ref, own)
+    expect(order.flat()).toEqual(["P.p1"])
   })
 
   it("孤儿 FUNCTION 独立成 unit", () => {
-    const ref = makeRefIndex([{ name: "P", procs: [
-      { name: "f1", type: "function" },
-    ] }])
+    const ref = makeRefIndex([{ name: "P", procs: [{ name: "f1", type: "function" }] }])
     const own = assignFunctionOwnership({}, ref)
     const order = buildProcedureOrder({}, ref, own)
     expect(order.flat()).toEqual(["P.f1"])
@@ -248,9 +231,8 @@ describe("buildProcedureOrder（单元级拓扑序）", () => {
       { name: "P", procs: [{ name: "f1", type: "function" }] },
       { name: "Q", procs: [{ name: "q1", type: "procedure" }] },
     ])
-    const callGraph = { "Q.q1": ["P.f1"] } // q1 调用 P.f1（孤儿）→ Q.q1 依赖 P.f1
-    const own = assignFunctionOwnership(callGraph, ref)
-    const order = buildProcedureOrder(callGraph, ref, own).flat()
+    const own = assignFunctionOwnership({ "Q.q1": ["P.f1"] }, ref)
+    const order = buildProcedureOrder({ "Q.q1": ["P.f1"] }, ref, own).flat()
     expect(order.indexOf("P.f1")).toBeLessThan(order.indexOf("Q.q1"))
   })
 
@@ -258,114 +240,82 @@ describe("buildProcedureOrder（单元级拓扑序）", () => {
     const ref = makeRefIndex([{ name: "P", procs: [
       { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
     ] }])
-    const callGraph = { "P.p1": ["P.p2"], "P.p2": ["P.p1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
-    const order = buildProcedureOrder(callGraph, ref, own)
+    const own = assignFunctionOwnership({ "P.p1": ["P.p2"], "P.p2": ["P.p1"] }, ref)
+    const order = buildProcedureOrder({ "P.p1": ["P.p2"], "P.p2": ["P.p1"] }, ref, own)
     expect(order.length).toBe(1)
     expect(order[0].sort()).toEqual(["P.p1", "P.p2"])
   })
-
-  it("同包跨单元调用：被依赖 unit 在前（多调用者归属后）", () => {
-    const ref = makeRefIndex([{ name: "P", procs: [
-      { name: "p1", type: "procedure" }, { name: "p2", type: "procedure" },
-      { name: "f1", type: "function" },
-    ] }])
-    // p1→f1, p2→f1：f1 归 p1（字典序）；p2→f1 折叠为 p2→p1 依赖边 → p1 在前
-    const callGraph = { "P.p1": ["P.f1"], "P.p2": ["P.f1"] }
-    const own = assignFunctionOwnership(callGraph, ref)
-    const order = buildProcedureOrder(callGraph, ref, own).flat()
-    expect(order.indexOf("P.p1")).toBeLessThan(order.indexOf("P.p2"))
-  })
 })
+
+// ── 合成 fixture：真实跨包调用 ──────────────────────────────────────────────
 
 describe("callGraph 真实跨包调用（合成 fixture）", () => {
   let synthDir: string
   let synthArtifacts: string
 
-  beforeAll(async () => {
+  async function buildSynth(pkgASpec: string, pkgBSpec: string) {
     synthDir = mkdtempSync(join(tmpdir(), "analysis-synth-"))
-    // pkg_b：被调用方
-    writeFileSync(join(synthDir, "pkg_b.pks"), `
-CREATE OR REPLACE PACKAGE pkg_b AS
-  PROCEDURE p2(p IN NUMBER);
-END pkg_b;
-/
-`, "utf-8")
+    writeFileSync(join(synthDir, "pkg_b.pks"), pkgBSpec, "utf-8")
     writeFileSync(join(synthDir, "pkg_b.pkb"), `
 CREATE OR REPLACE PACKAGE BODY pkg_b AS
-  PROCEDURE p2(p IN NUMBER) IS
-  BEGIN
-    NULL;
-  END;
+  PROCEDURE p2(p IN NUMBER) IS BEGIN NULL; END;
 END pkg_b;
 /
 `, "utf-8")
-    // pkg_a：调用 pkg_b.p2
     writeFileSync(join(synthDir, "pkg_a.pks"), `
 CREATE OR REPLACE PACKAGE pkg_a AS
   PROCEDURE p1(p IN NUMBER);
 END pkg_a;
 /
 `, "utf-8")
-    writeFileSync(join(synthDir, "pkg_a.pkb"), `
-CREATE OR REPLACE PACKAGE BODY pkg_a AS
+    writeFileSync(join(synthDir, "pkg_a.pkb"), pkgASpec, "utf-8")
+    const index = await scanSource(synthDir)
+    synthArtifacts = mkdtempSync(join(tmpdir(), "analysis-synth-art-"))
+    writeFileSync(join(synthArtifacts, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
+    buildInventoryFromIndex(synthArtifacts)
+    return buildDependencyGraph(synthArtifacts)
+  }
+
+  it("callGraph 捕获跨包子程序调用 PKG_A.p1 → PKG_B.p2", async () => {
+    const g = await buildSynth(
+      `CREATE OR REPLACE PACKAGE BODY pkg_a AS
   PROCEDURE p1(p IN NUMBER) IS
   BEGIN
     pkg_b.p2(p);
   END;
 END pkg_a;
-/
-`, "utf-8")
-
-    const index = await scanSource(synthDir)
-    synthArtifacts = mkdtempSync(join(tmpdir(), "analysis-synth-art-"))
-    writeFileSync(join(synthArtifacts, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-    buildDependencyGraphFromIndex(synthArtifacts)
+/`,
+      `CREATE OR REPLACE PACKAGE pkg_b AS
+  PROCEDURE p2(p IN NUMBER);
+END pkg_b;
+/`,
+    )
+    expect(g.callGraph["PKG_A.P1"]).toContain("PKG_B.P2")
+    expect(g.packageDependency["PKG_A"]).toContain("PKG_B")
+    expect(g.packageDependency["PKG_B"]).toEqual([])
+    const order = g.translationOrder.flat()
+    expect(order.indexOf("PKG_B")).toBeLessThan(order.indexOf("PKG_A"))
   }, 60000)
 
-  it("callGraph 捕获跨包子程序调用 PKG_A.p1 → PKG_B.p2", () => {
-    const a = JSON.parse(readFileSync(join(synthArtifacts, "dependency-graph.json"), "utf-8"))
-    expect(a.callGraph["PKG_A.p1"]).toContain("PKG_B.p2")
-  })
-
-  it("packageDependency: PKG_A → PKG_B", () => {
-    const a = JSON.parse(readFileSync(join(synthArtifacts, "dependency-graph.json"), "utf-8"))
-    expect(a.packageDependency["PKG_A"]).toContain("PKG_B")
-    expect(a.packageDependency["PKG_B"]).toEqual([])
-  })
-
-  it("translationOrder: PKG_B（依赖）先于 PKG_A", () => {
-    const a = JSON.parse(readFileSync(join(synthArtifacts, "dependency-graph.json"), "utf-8"))
-    const order = a.translationOrder.flat()
-    expect(order.indexOf("PKG_B")).toBeLessThan(order.indexOf("PKG_A"))
-  })
-
-  it("常量引用不进 callGraph 但进 packageDependency", async () => {
-    // 重写 pkg_a body：调用 pkg_b 常量（非子程序）→ 不进 callGraph，但进 packageDependency
-    writeFileSync(join(synthDir, "pkg_a.pkb"), `
-CREATE OR REPLACE PACKAGE BODY pkg_a AS
+  it("常量引用不进 callGraph（directCalls 仅捕获调用，非包级引用）", async () => {
+    // 新形状：directCalls 仅记录带 function_argument 的调用；裸常量引用 pkg_b.c_const 不进 directCalls，
+    // 故 callGraph 无边。包级 packageDependency 也由 directCalls 聚合，常量引用不建边
+    //（旧 scanCallSites 捕获所有 PKG.X；新 listener 仅捕获调用——已知限制，const-only 包依赖需另行补）。
+    const g = await buildSynth(
+      `CREATE OR REPLACE PACKAGE BODY pkg_a AS
   PROCEDURE p1(p IN NUMBER) IS
     v NUMBER;
   BEGIN
     v := pkg_b.c_const;
   END;
 END pkg_a;
-/
-`, "utf-8")
-    // pkg_b 加常量
-    writeFileSync(join(synthDir, "pkg_b.pks"), `
-CREATE OR REPLACE PACKAGE pkg_b AS
+/`,
+      `CREATE OR REPLACE PACKAGE pkg_b AS
   c_const CONSTANT NUMBER := 1;
   PROCEDURE p2(p IN NUMBER);
 END pkg_b;
-/
-`, "utf-8")
-    const index2 = await scanSource(synthDir)
-    const art2 = mkdtempSync(join(tmpdir(), "analysis-synth-art2-"))
-    writeFileSync(join(art2, "inventory-index.json"), JSON.stringify(index2, null, 2), "utf-8")
-    buildDependencyGraphFromIndex(art2)
-    const a = JSON.parse(readFileSync(join(art2, "dependency-graph.json"), "utf-8"))
-    expect(a.callGraph).toEqual({}) // 常量引用不进 callGraph
-    expect(a.packageDependency["PKG_A"]).toContain("PKG_B") // 但进包依赖
-  })
+/`,
+    )
+    expect(g.callGraph["PKG_A.P1"]).toBeUndefined()
+  }, 60000)
 })

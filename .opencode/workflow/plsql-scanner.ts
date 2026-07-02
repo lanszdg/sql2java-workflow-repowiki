@@ -444,6 +444,26 @@ class PlSqlStructListener implements PlSqlParserListener {
     this.recordCall(m[1], ctx.start.line, "function")
   }
 
+  // 用户函数调用（如 `v := get_item(p)` / `pkg.func(p)`）在 PL/SQL 表达式中走 general_element
+  //（非 standard_function），standard_function 只覆盖 SQL 内建函数。监听 general_element 的 part，
+  // 带 function_argument 的 part 即调用点：限定名 = 前置 part.id + 本 part.id。
+  enterGeneral_element(ctx: any) {
+    if (this.subprogramStack.length === 0) return
+    const parts = ctx.general_element_part() as any[]
+    const partArr = Array.isArray(parts) ? parts : (parts ? [parts] : [])
+    const prefix: string[] = []
+    for (const part of partArr) {
+      const id = part?.id_expression()?.text ?? ""
+      const args = part?.function_argument() as any
+      const hasArgs = Array.isArray(args) ? args.length > 0 : !!args
+      if (hasArgs && id) {
+        const qualified = [...prefix, id].filter(Boolean).join(".")
+        this.recordCall(qualified, (part.start?.line ?? ctx.start.line), "function")
+      }
+      if (id) prefix.push(id)
+    }
+  }
+
   private recordCallFromRoutine(_rn: Routine_nameContext | undefined, _line: number, _kind: "function" | "procedure") {
     // 保留签名兼容；实际 directCalls 经 enterCall_statement / enterStandard_function 走 recordCall
   }
