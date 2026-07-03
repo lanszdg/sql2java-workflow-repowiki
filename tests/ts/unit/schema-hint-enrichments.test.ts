@@ -12,7 +12,6 @@ import {
 import { QUALITY_GATE_THRESHOLDS } from "@workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "@workflow/workflow-definitions"
 import {
-  InventoryPackageSchema,
   TranslationSchema,
   ReviewSchema,
   ReviewSummarySchema,

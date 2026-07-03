@@ -104,48 +104,6 @@ export const InventoryIndexSchema = z.object({
 }).passthrough()
 
 // ============================================================================
-// Inventory Package Schema（逐包 inventory，LLM enriched）
-// ============================================================================
-
-/** 逐包 inventory 的 procedure 结构 — 与 InventorySchema 旧格式兼容 */
-const InventoryProcedureSchema = z.object({
-  name: z.string(),
-  type: ciEnumLower(["procedure", "function"]),
-  params: z.array(z.object({
-    name: z.string(),
-    oracleType: z.string(),
-    direction: ciEnumUpper(["IN", "OUT", "IN OUT"]),
-  })),
-  returnType: z.string().nullable().optional(),
-  lineRange: z.tuple([z.number(), z.number()]),
-  loc: z.number(),
-})
-
-export const InventoryPackageSchema = z.object({
-  packageName: z.string(),
-  headerFile: z.string().nullable().optional(),
-  bodyFile: z.string().nullable().optional(),
-  procedures: z.array(InventoryProcedureSchema),
-  types: z.array(z.object({
-    name: z.string(),
-    kind: z.string(),
-    definition: z.string(),
-  })),
-  variables: z.array(z.object({
-    name: z.string(),
-    type: z.string(),
-    defaultValue: z.string().nullable().optional(),
-  })),
-  constants: z.array(z.object({
-    name: z.string(),
-    type: z.string(),
-    value: z.string(),
-  })),
-}).passthrough().refine(
-  pkg => pkg.procedures.length === 0 || pkg.bodyFile !== undefined,
-  { message: "有 procedures 的包必须有 bodyFile（procedure 实现体在 body 中）" }
-)
-// ============================================================================
 // Inventory Schema（顶层轻量索引：packageNames + tableNames + triggers/views/sequences + 元信息）
 // tables 列结构拆到 tables/{TABLE}.json（TableArtifactSchema）；包过程详情拆到 packages/+subprograms/
 // ============================================================================
@@ -292,43 +250,6 @@ const SubprogramSchema = z.object({
   })),
   translationNotes: z.array(z.string()),
 })
-
-/** dependency-graph.json — 全局元数据（不含逐包子程序数据） */
-export const DependencyGraphSchema = z.object({
-  /**
-   * 调用图：key = 限定名 `PKG.refName`，value = 被调用的 `PKG.refName` 数组（与 key 同规范）。
-   * refName 规范：非重载子程序=Oracle 原始名；重载子程序=`{name}__{序号}`（1-based，全部带序号），
-   * 与 FSD 文件名、translation.json.subprogramMethods.oracleName 一致（修现行裸名撞重载的缺陷）。
-   */
-  callGraph: z.record(z.string(), z.array(z.string())),
-  packageDependency: z.record(z.string(), z.array(z.string())),
-  translationOrder: z.array(z.array(z.string())),
-  complexity: z.record(z.string(), z.object({
-    score: z.number().min(1).max(10),
-    patterns: z.array(z.string()),
-    riskLevel: ciEnumLower(["low", "medium", "high"]),
-  })),
-  sccGroups: z.array(z.array(z.string())),
-  packageNames: z.array(z.string()),
-
-  /**
-   * PROCEDURE 级拓扑序（翻译单元层）。每层是一组 unit id（`PKG.refName`），依赖在前。
-   * unit = 一个 PROCEDURE，或一个「孤儿 FUNCTION」（同包内无 PROCEDURE 经 function 链调用它）。
-   * 被 owner PROCEDURE 拥有的 FUNCTION 不是独立 unit，不在本表，随 owner 翻译（见 functionOwnership）。
-   * translate 分片按本字段调度（取代包级 translationOrder）。optional：旧 run 无此字段时
-   * engine 回退到包级 translationOrder（向后兼容）。
-   */
-  procedureOrder: z.array(z.array(z.string())).optional(),
-
-  /**
-   * FUNCTION 属主归属：`PKG.funcRefName` → `PKG.ownerProcRefName`（同包内）。
-   * 仅含「被某个 PROCEDURE 拥有」的 FUNCTION；孤儿 FUNCTION 不入表（它们自身是 unit）。
-   * 属主判定：同包内反向可达的 PROCEDURE 集合；恰 1 个→归它，≥2 个→调用次数最多者
-   * （并列取 refName 字典序最小），0 个→孤儿。跨包调用不建立属主。
-   * 供 translate 收窄 FSD（owner 单元的 cargo FUNCTION）+ 审计。
-   */
-  functionOwnership: z.record(z.string(), z.string()).optional(),
-}).passthrough()
 
 /** analysis-packages/{pkg}.json — 逐包子程序结构（聚合，由 engine mergeUnitAnalysis 产出） */
 export const AnalysisPackageSchema = z.object({
@@ -991,11 +912,6 @@ export function getSchemaForPhase(phase: string): ZodType | null {
     fix: FixArtifactSchema,
   }
   return schemaMap[phase] ?? null
-}
-
-/** 查找 inventory per-package schema（inventory 阶段拆分校验用） */
-export function getInventoryPackageSchema(): ZodType {
-  return InventoryPackageSchema
 }
 
 /** 根据阶段名查找 per-package schema */
