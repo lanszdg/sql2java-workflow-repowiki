@@ -49,6 +49,14 @@ export interface DirectCall {
   kind: "function" | "procedure"
 }
 
+/** 跨包非调用引用（pkg.const / pkg.type / pkg.var）——不进 callGraph，仅聚合进 packageDependency，
+ *  使 scope-computer 闭包能纳入「仅常量/类型被引用」的包（修复 const-only 包漏入闭包）。 */
+export interface PackageRef {
+  package: string
+  name: string
+  line: number
+}
+
 export interface SubprogramInfo {
   name: string
   type: "PROCEDURE" | "FUNCTION"
@@ -61,6 +69,7 @@ export interface SubprogramInfo {
   returnType: string | null
   loc: number
   directCalls: DirectCall[]
+  packageRefs: PackageRef[]
 }
 
 export interface ConstantInfo { name: string; type: string; value: string }
@@ -350,6 +359,7 @@ class PlSqlStructListener implements PlSqlParserListener {
         returnType: null,
         loc: 0,
         directCalls: [],
+        packageRefs: [],
       }
       slots.push(slot)
       this.subprograms.set(key, slots)
@@ -483,18 +493,31 @@ class PlSqlStructListener implements PlSqlParserListener {
   // 带 function_argument 的 part 即调用点：限定名 = 前置 part.id + 本 part.id。
   enterGeneral_element(ctx: any) {
     if (this.subprogramStack.length === 0) return
-    const parts = ctx.general_element_part() as any[]
-    const partArr = Array.isArray(parts) ? parts : (parts ? [parts] : [])
-    const prefix: string[] = []
-    for (const part of partArr) {
-      const id = part?.id_expression()?.text ?? ""
-      const args = part?.function_argument() as any
-      const hasArgs = Array.isArray(args) ? args.length > 0 : !!args
-      if (hasArgs && id) {
-        const qualified = [...prefix, id].filter(Boolean).join(".")
-        this.recordCall(qualified, (part.start?.line ?? ctx.start.line), "function")
-      }
-      if (id) prefix.push(id)
+    const text = ctxText(ctx)
+    // general_element 是递归规则（general_element ('.' general_element_part)+），
+    // ctx.general_element_part() 只返回最末段，dotted 限定符在嵌套子节点——故用整体文本解析。
+    // 统一用「去引号 + lastIndexOf('.')」拆限定名，与 refname.ts（pkgOf/refOf 单一真相源）及
+    // recordCall 一致，正确处理 dotted 包名（fm.xxx）与 schema 限定（app.pkg）。
+    const parenIdx = text.indexOf("(")
+    if (parenIdx < 0) {
+      // 非调用限定引用：pkg.const / pkg.type / pkg.var（表达式中的常量/类型/变量引用）。
+      const cleaned = text.replace(/["`]/g, "")
+      const lastDot = cleaned.lastIndexOf(".")
+      if (lastDot <= 0) return  // 裸名变量引用，无包限定符
+      this.recordPackageRef(cleaned.slice(0, lastDot), cleaned.slice(lastDot + 1), ctx.start.line)
+      return
+    }
+    // 调用：限定名 = '(' 之前文本（含 pkg.func 形式）。直接传完整限定名给 recordCall（其内部按
+    // lastIndexOf 拆 pkg/member、处理裸名归属 + SQL_PSEUDO + 自递归）。修复递归 grammar 导致
+    // ctx.general_element_part() 只取末段、限定调用 pkg.func(args) 丢前缀被记成裸名遭后过滤丢弃的缺陷。
+    const cleaned = text.slice(0, parenIdx).replace(/["`]/g, "")
+    this.recordCall(cleaned, ctx.start.line, "function")
+    // 限定调用的包限定符额外记 packageRef：覆盖「被调用成员非子程序」（类型构造 pkg.t_rec_type(...)、
+    // 集合访问 pkg.g_array(i)）及 directCall 后过滤丢弃但包依赖仍应保留的情形。真实调用的
+    // packageDependency 边与 directCall 重复，由 dependency-graph 聚合去重。
+    const lastDot = cleaned.lastIndexOf(".")
+    if (lastDot > 0) {
+      this.recordPackageRef(cleaned.slice(0, lastDot), cleaned.slice(lastDot + 1), ctx.start.line)
     }
   }
 
@@ -522,6 +545,30 @@ class PlSqlStructListener implements PlSqlParserListener {
     if (pkg === "NEW" || pkg === "OLD") return
     if (pkg === caller.belongToPackage && method === caller.name) return // 自递归
     caller.directCalls.push({ package: pkg, name: method, line, kind })
+  }
+
+  /** 记录跨包非调用引用（pkg.const / pkg.type）。仅原始入栈，后过滤按已知包名收窄。 */
+  private recordPackageRef(qualifier: string, name: string, line: number) {
+    if (this.subprogramStack.length === 0) return
+    const caller = this.subprogramStack[this.subprogramStack.length - 1]
+    const pkg = cleanName(qualifier)
+    const member = cleanName(name)
+    if (pkg.length < 2 || member.length < 2) return
+    if (pkg === "NEW" || pkg === "OLD") return
+    caller.packageRefs.push({ package: pkg, name: member, line })
+  }
+
+  // 声明中的跨包类型引用（v_row const_pkg.t_rec; / p in other_pkg.t_rec）走 type_name，
+  // 不进 general_element。捕获 dotted type_name，后过滤按已知包名收窄（原生类型走 datatype 不进 type_name；
+  // table.col%TYPE 的 table 非包被过滤）。
+  enterType_name(ctx: any) {
+    if (this.subprogramStack.length === 0) return
+    // 与 enterGeneral_element 一致：去引号 + lastIndexOf('.') 拆限定名，正确处理 dotted 包名
+    // （fm.xxx.t_rec → 包限定符 fm.xxx）与 schema 限定。原生类型（NUMBER 等）走 datatype 不进此规则。
+    const cleaned = ctxText(ctx).replace(/["`]/g, "")
+    const lastDot = cleaned.lastIndexOf(".")
+    if (lastDot <= 0) return  // 裸类型名，无包限定符
+    this.recordPackageRef(cleaned.slice(0, lastDot), cleaned.slice(lastDot + 1), ctx.start.line)
   }
 
   // ParseTreeListener 必需的 4 个 no-op
@@ -650,6 +697,26 @@ export async function scanWithAST(roots: string[], primaryBase: string): Promise
     s.directCalls = filtered
   }
 
+  // packageRefs 后过滤 + 去重：只保留指向「已知项目包」的跨包引用（排除 localRecord.field /
+  // schema.table.col / DBMS_OUTPUT 等外部限定）。已知包 = packages + standalone 虚拟包。
+  // 同包引用不产生 packageDependency 边，丢弃。callGraph 不受影响。
+  const knownPackages = new Set<string>()
+  for (const p of pkgList) knownPackages.add(p.packageName.toUpperCase())
+  for (const s of subprogramList) {
+    const seen = new Set<string>()
+    const filtered: PackageRef[] = []
+    for (const r of s.packageRefs) {
+      const pkg = r.package.toUpperCase()
+      if (pkg === s.belongToPackage.toUpperCase()) continue  // 同包引用，无跨包边
+      if (!knownPackages.has(pkg)) continue                  // 非已知项目包
+      const key = `${pkg}.${r.name.toUpperCase()}.${r.line}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      filtered.push({ package: pkg, name: r.name.toUpperCase(), line: r.line })
+    }
+    s.packageRefs = filtered
+  }
+
   // 回填包的 functions/procedures 名字索引（去重，保序）
   for (const pkg of pkgList) {
     const seenProc = new Set<string>()
@@ -722,6 +789,7 @@ function injectStandaloneVirtualPackages(
       returnType: s.returnType ?? null,
       loc: range ? range[1] - range[0] + 1 : 0,
       directCalls: [],
+      packageRefs: [],
     })
   }
 }

@@ -199,6 +199,11 @@ export const SubprogramArtifactSchema = z.object({
     line: z.number(),
     kind: z.enum(["function", "procedure"]),
   })).default([]),
+  packageRefs: z.array(z.object({
+    package: z.string(),
+    name: z.string(),
+    line: z.number(),
+  })).default([]),
 }).passthrough()
 
 /** tables/{TABLE}.json — 单表列结构 + 主键 + 外键 */

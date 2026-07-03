@@ -21,6 +21,7 @@ interface SubprogramFile {
   overloadIndex: number | null
   isPrivate: boolean
   directCalls: { package: string; name: string; line: number; kind: "function" | "procedure" }[]
+  packageRefs?: { package: string; name: string; line: number }[]
 }
 
 export interface RefIndexEntry {
@@ -273,6 +274,16 @@ export function buildDependencyGraph(artifactsDir: string): DependencyGraph {
       }
     }
     if (arr.length > 0) callGraph[callerKey] = arr
+  }
+
+  // packageRefs 聚合进 packageDependency（不进 callGraph）——仅常量/类型被引用的跨包边，
+  // 使 scope-computer 闭包能纳入 const-only 包。caller/callee 不同包才记边（自环由后续去重兜底）。
+  for (const s of subprograms) {
+    for (const r of s.packageRefs ?? []) {
+      if (r.package !== s.belongToPackage) {
+        packageDepsRaw.push({ callerPkg: s.belongToPackage, calleePkg: r.package })
+      }
+    }
   }
 
   // packageDependency：跨包引用聚合（排除自环，去重）
