@@ -212,6 +212,10 @@ function ctxText(ctx: ParserRuleContext | undefined | null): string {
  */
 function stripSqlPlusCommands(code: string): string {
   let inUnit = false
+  // 括号深度：SQL*Plus 命令是顶层语句，永不出现在括号内。CREATE TABLE 列定义在 (...) 内，
+  // 列名可能恰好是 EXIT/SET/COLUMN 等 SQL*Plus 关键字（如 `EXIT VARCHAR2(10),`）——若按行首关键字
+  // 剥行会误删列。故括号内一律不剥。
+  let parenDepth = 0
   const unitStart = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i
   const unitEnd = /^\s*\/\s*$/
   const sqlPlusLine = /^(prompt|@@?\s?\S|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR|SET)\b/i
@@ -221,11 +225,32 @@ function stripSqlPlusCommands(code: string): string {
       const trimmed = line.trimStart()
       if (unitStart.test(trimmed)) inUnit = true
       else if (inUnit && unitEnd.test(trimmed)) inUnit = false
-      // 单元内保留（SET/EXIT 等是 PL/SQL）；单元外剥 SQL*Plus 命令
-      if (!inUnit && sqlPlusLine.test(trimmed)) return ""
+      // 单元内保留（SET/EXIT 等是 PL/SQL）；单元外且括号外剥 SQL*Plus 命令
+      if (!inUnit && parenDepth === 0 && sqlPlusLine.test(trimmed)) {
+        parenDepth += parenDelta(line)
+        return ""
+      }
+      parenDepth += parenDelta(line)
       return line
     })
     .join("\n")
+}
+
+/** 单行括号深度增量（跳过单引号字符串内的括号，'' 视为转义引号） */
+function parenDelta(line: string): number {
+  let depth = 0
+  let inStr = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (c === "'") {
+      if (inStr && line[i + 1] === "'") { i++; continue }  // 转义引号 ''
+      inStr = !inStr
+    } else if (!inStr) {
+      if (c === "(") depth++
+      else if (c === ")") depth--
+    }
+  }
+  return depth
 }
 
 // ── AST Listener ─────────────────────────────────────────────────────────────────
@@ -255,12 +280,16 @@ class PlSqlStructListener implements PlSqlParserListener {
   private currentPackage: string | null = null
   /** 当前所处子程序栈（仅 body 压栈，用于 directCalls 归属 caller） */
   private subprogramStack: SubprogramInfo[] = []
+  /** 嵌套局部过程（过程体内 declare_spec 递归定义）的槽位标记：不注册为包级，
+   *  exit 时把其 directCalls/packageRefs 卷回外层后弹出，避免污染 subprograms/重载/callGraph。 */
+  private readonly localSlots = new WeakSet<SubprogramInfo>()
   /** 包级声明栈深度：仅在栈空时收 package 级 constants/variables/types/exceptions */
   constructor(
     private readonly absolutePath: string,
     private readonly packages: Map<string, PackageInfo>,
     private readonly subprograms: Map<string, SubprogramInfo[]>,
     private readonly standaloneProcedures: StandaloneProcIndex[],
+    private readonly standaloneSlots: SubprogramInfo[],
     private readonly warnings: string[],
     private readonly tokens: CommonTokenStream,
   ) {}
@@ -406,17 +435,66 @@ class PlSqlStructListener implements PlSqlParserListener {
   enterProcedure_body(ctx: Procedure_bodyContext) {
     const name = ctx.identifier()?.text
     if (!name) return
-    this.registerSubprogram(name, "PROCEDURE", true, ctx, extractParams(ctx.parameter()), null)
+    this.enterSubprogramBody(name, "PROCEDURE", ctx, extractParams(ctx.parameter()), null)
   }
   enterFunction_body(ctx: Function_bodyContext) {
     const name = ctx.identifier()?.text
     if (!name) return
-    this.registerSubprogram(name, "FUNCTION", true, ctx, extractParams(ctx.parameter()), extractReturnType(ctx))
+    this.enterSubprogramBody(name, "FUNCTION", ctx, extractParams(ctx.parameter()), extractReturnType(ctx))
   }
-  exitProcedure_body() { this.subprogramStack.pop() }
-  exitFunction_body() { this.subprogramStack.pop() }
+  exitProcedure_body() { this.popSubprogramBody() }
+  exitFunction_body() { this.popSubprogramBody() }
+
+  /**
+   * 进入子程序体。栈空 = 顶层包体子程序（与 spec 配对，注册为包级）；
+   * 栈非空 = 嵌套局部过程（declare_spec 递归触发）——不注册（否则污染 subprograms/重载/callGraph），
+   * 仅压局部槽位使体内调用归属正确，exit 时卷回外层。
+   */
+  private enterSubprogramBody(
+    nameRaw: string, type: "PROCEDURE" | "FUNCTION",
+    ctx: Procedure_bodyContext | Function_bodyContext,
+    params: ParamInfo[], returnType: string | null,
+  ): void {
+    if (!this.currentPackage) return
+    if (this.subprogramStack.length === 0) {
+      this.registerSubprogram(nameRaw, type, true, ctx, params, returnType)
+      return
+    }
+    const name = cleanName(nameRaw)
+    const range = ctxLineRange(ctx)
+    const slot: SubprogramInfo = {
+      name, type,
+      belongToPackage: this.currentPackage,
+      overloadIndex: null,
+      isPrivate: true,
+      headerLocation: null,
+      bodyLocation: range ? { absolutePath: this.absolutePath, lineRange: range } : null,
+      parameters: params, returnType,
+      loc: range ? range[1] - range[0] + 1 : 0,
+      directCalls: [], packageRefs: [],
+    }
+    this.subprogramStack.push(slot)
+    this.localSlots.add(slot)
+  }
+
+  /** 退出子程序体：局部槽位的调用卷回外层后弹出；包级槽位直接弹出。 */
+  private popSubprogramBody(): void {
+    const slot = this.subprogramStack.pop()
+    if (slot && this.localSlots.has(slot)) {
+      const outer = this.subprogramStack[this.subprogramStack.length - 1]
+      if (outer) {
+        outer.directCalls.push(...slot.directCalls)
+        outer.packageRefs.push(...slot.packageRefs)
+      }
+      this.localSlots.delete(slot)
+    }
+  }
 
   // ── standalone CREATE PROCEDURE/FUNCTION（顶层，非包内）──────────────────────
+  //   建子程序槽位并压 subprogramStack，使体内的 directCalls/packageRefs 被捕获（旧实现仅推
+  //   standaloneProcedures 索引、不压栈，导致 enterCall_statement 等因栈空早退，standalone 体内调用全丢，
+  //   injectStandaloneVirtualPackages 写死 directCalls:[]）。槽位与索引同序推入 standaloneSlots，
+  //   由 injectStandaloneVirtualPackages 配对挂到虚拟包。
   enterCreate_function_body(ctx: Create_function_bodyContext) {
     const name = cleanName(ctx.function_name()?.text ?? "")
     if (!name) return
@@ -427,6 +505,7 @@ class PlSqlStructListener implements PlSqlParserListener {
       returnType: normalizeTypeText(ctxText(ctx.type_spec())) || null,
       lineRange: range ?? undefined,
     })
+    this.pushStandaloneSlot(name, "FUNCTION", range)
   }
   enterCreate_procedure_body(ctx: Create_procedure_bodyContext) {
     const name = cleanName(ctx.procedure_name()?.text ?? "")
@@ -438,6 +517,28 @@ class PlSqlStructListener implements PlSqlParserListener {
       returnType: null,
       lineRange: range ?? undefined,
     })
+    this.pushStandaloneSlot(name, "PROCEDURE", range)
+  }
+  exitCreate_function_body() { this.subprogramStack.pop() }
+  exitCreate_procedure_body() { this.subprogramStack.pop() }
+
+  /** 建 standalone 槽位并压栈（belongToPackage 占位，由 injectStandaloneVirtualPackages 回填虚拟包名） */
+  private pushStandaloneSlot(name: string, type: "PROCEDURE" | "FUNCTION", range: [number, number] | null) {
+    const slot: SubprogramInfo = {
+      name, type,
+      belongToPackage: "",  // 占位，injectStandaloneVirtualPackages 回填 __STANDALONE_x__
+      overloadIndex: null,
+      isPrivate: false,
+      headerLocation: null,
+      bodyLocation: range ? { absolutePath: this.absolutePath, lineRange: range } : null,
+      parameters: [],
+      returnType: null,
+      loc: range ? range[1] - range[0] + 1 : 0,
+      directCalls: [],
+      packageRefs: [],
+    }
+    this.subprogramStack.push(slot)
+    this.standaloneSlots.push(slot)
   }
 
   // ── 包级声明（仅在 subprogramStack 为空时收，避免收进过程局部变量）─────────
@@ -639,6 +740,7 @@ export async function scanWithAST(roots: string[], primaryBase: string): Promise
   const views: ViewIndex[] = []
   const sequences: SequenceIndex[] = []
   const standaloneProcedures: StandaloneProcIndex[] = []
+  const standaloneSlots: SubprogramInfo[] = []
   const warnings: string[] = []
   const processed = new Set<string>()  // 按绝对路径去重，防多根重叠导致重复扫描
 
@@ -656,10 +758,10 @@ export async function scanWithAST(roots: string[], primaryBase: string): Promise
     extractSequenceFromText(code, sequences, relPath)
 
     // 包/子程序/独立过程走 AST
-    parseFileAst(code, relPath, packages, subprograms, standaloneProcedures, warnings)
+    parseFileAst(code, relPath, packages, subprograms, standaloneProcedures, standaloneSlots, warnings)
   }
 
-  return finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, tables, triggers, views, sequences, warnings, "ast")
+  return finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "ast")
 }
 
 /**
@@ -673,6 +775,7 @@ function parseFileAst(
   packages: Map<string, PackageInfo>,
   subprograms: Map<string, SubprogramInfo[]>,
   standaloneProcedures: StandaloneProcIndex[],
+  standaloneSlots: SubprogramInfo[],
   warnings: string[],
 ): void {
   try {
@@ -684,7 +787,7 @@ function parseFileAst(
     lex.removeErrorListeners()
     parser.removeErrorListeners()
     const tree = parser.sql_script()
-    const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, warnings, tokens)
+    const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, standaloneSlots, warnings, tokens)
     ParseTreeWalker.DEFAULT.walk(listener as any, tree)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -705,6 +808,7 @@ function finalizeInventoryIndex(
   packages: Map<string, PackageInfo>,
   subprograms: Map<string, SubprogramInfo[]>,
   standaloneProcedures: StandaloneProcIndex[],
+  standaloneSlots: SubprogramInfo[],
   tables: TableIndex[],
   triggers: TriggerIndex[],
   views: ViewIndex[],
@@ -723,7 +827,7 @@ function finalizeInventoryIndex(
 
   // standalone 虚拟包注入（在 directCalls 后过滤前，使调用 standalone 的边被保留）
   const pkgList = Array.from(packages.values())
-  injectStandaloneVirtualPackages(pkgList, subprogramList, standaloneProcedures)
+  injectStandaloneVirtualPackages(pkgList, subprogramList, standaloneProcedures, standaloneSlots)
 
   // directCalls 后过滤 + 去重：只保留指向已知子程序的调用（排除 SQL 内建函数 / 外部包 / 误捕）。
   // 建索引：PKG -> Set<METHOD>（大写），用于校验 callee 是否落在本项目子程序集合内。
@@ -806,11 +910,13 @@ function injectStandaloneVirtualPackages(
   packages: PackageInfo[],
   subprograms: SubprogramInfo[],
   standaloneProcedures: StandaloneProcIndex[],
+  standaloneSlots: SubprogramInfo[],
 ): void {
-  // standalone 从 subprograms 里那些 belongToPackage 为虚拟包的项识别——但 standalone 此处尚未建。
-  // 简化：standalone 由 scanWithRegex/AST 单独收集（见 collectStandaloneFromText），这里仅注入虚拟包壳。
+  // standaloneProcedures 与 standaloneSlots 同序（同一 enterCreate_*_body 推入），按索引配对。
+  // 槽位的 directCalls/packageRefs 已在 AST walk 时压栈捕获；此处仅回填虚拟包名并推入列表。
   const existing = new Set(packages.map(p => p.packageName))
-  for (const s of standaloneProcedures) {
+  for (let i = 0; i < standaloneProcedures.length; i++) {
+    const s = standaloneProcedures[i]
     const vname = `__STANDALONE_${s.name}__`
     let name = vname
     let n = 2
@@ -827,20 +933,25 @@ function injectStandaloneVirtualPackages(
       procedures: [],
       estimatedLoc: range ? range[1] - range[0] + 1 : 0,
     })
-    subprograms.push({
-      name: s.name,
-      type: s.type,
-      belongToPackage: name,
-      overloadIndex: null,
-      isPrivate: false,
-      headerLocation: null,
-      bodyLocation: range ? { absolutePath: s.sourceFile, lineRange: range } : null,
-      parameters: s.parameters ?? [],
-      returnType: s.returnType ?? null,
-      loc: range ? range[1] - range[0] + 1 : 0,
-      directCalls: [],
-      packageRefs: [],
-    })
+    const slot = standaloneSlots[i]
+    if (slot) {
+      // 用 AST walk 已捕获 directCalls/packageRefs 的槽位（回填虚拟包名 + 索引字段）
+      slot.belongToPackage = name
+      slot.parameters = s.parameters ?? slot.parameters
+      slot.returnType = s.returnType ?? slot.returnType
+      subprograms.push(slot)
+    } else {
+      // 兜底（regex 路径无槽位）：建空槽位，directCalls 不可得
+      subprograms.push({
+        name: s.name, type: s.type, belongToPackage: name,
+        overloadIndex: null, isPrivate: false,
+        headerLocation: null,
+        bodyLocation: range ? { absolutePath: s.sourceFile, lineRange: range } : null,
+        parameters: s.parameters ?? [], returnType: s.returnType ?? null,
+        loc: range ? range[1] - range[0] + 1 : 0,
+        directCalls: [], packageRefs: [],
+      })
+    }
   }
 }
 
@@ -866,12 +977,15 @@ function extractTableFromText(code: string, tables: TableIndex[], relPath: strin
     // 列名 CREATE / 类型 TABLE（旧实现 body 从 CREATE 起切，首列产出垃圾 "CREATE"）。
     const parenIdx = fullBody.indexOf("(")
     const body = parenIdx >= 0 ? fullBody.slice(parenIdx + 1) : fullBody
+    // 剥 /* */ 块注释（多行注释替换为等量换行，保持行结构/行号），否则注释中间行
+    // `col_more NUMBER */` 会被列正则 ^(\w+)\s+(.+)$ 误判为幻影列。-- 行注释由各行尾处理。
+    const bodyNoComments = body.replace(/\/\*[\s\S]*?\*\//g, m => "\n".repeat((m.match(/\n/g) || []).length))
     const columns: ColumnIndex[] = []
     const pkCols = new Set<string>()
     const foreignKeys: ForeignKeyInfo[] = []
     // 列定义逐行解析：name + rest（rest = 类型 + 约束 DEFAULT/NOT NULL/PRIMARY KEY 等，到逗号或行尾）。
     // 旧 multiline 正则只消费到类型，NOT NULL 等约束不在 rest 内 → nullable 误判。
-    for (const rawLine of body.split("\n")) {
+    for (const rawLine of bodyNoComments.split("\n")) {
       const trimmed = rawLine.trim().replace(/,\s*$/, "")
       if (!trimmed) continue
       // 跳过外联约束行（CONSTRAINT / PRIMARY KEY ... 单独行）
@@ -898,7 +1012,7 @@ function extractTableFromText(code: string, tables: TableIndex[], relPath: strin
       if (inlinePk) pkCols.add(colName)
     }
     // 外联约束
-    for (const fk of body.matchAll(/CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\w.]+)\s*\(([^)]+)\)/gi)) {
+    for (const fk of bodyNoComments.matchAll(/CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\w.]+)\s*\(([^)]+)\)/gi)) {
       foreignKeys.push({
         name: cleanName(fk[1]),
         columns: fk[2].split(",").map(c => cleanName(c)),
@@ -907,7 +1021,7 @@ function extractTableFromText(code: string, tables: TableIndex[], relPath: strin
       })
     }
     // 外联主键
-    for (const pk of body.matchAll(/CONSTRAINT\s+\w+\s+PRIMARY\s+KEY\s*\(([^)]+)\)/gi)) {
+    for (const pk of bodyNoComments.matchAll(/CONSTRAINT\s+\w+\s+PRIMARY\s+KEY\s*\(([^)]+)\)/gi)) {
       for (const c of pk[1].split(",")) pkCols.add(cleanName(c))
     }
     if (pkCols.size > 0) {
@@ -1203,6 +1317,7 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
   const packages = new Map<string, PackageInfo>()
   const subprograms = new Map<string, SubprogramInfo[]>()
   const standaloneProcedures: StandaloneProcIndex[] = []
+  const standaloneSlots: SubprogramInfo[] = []
   const warnings: string[] = [`lazy 扫描：仅解析入口 ${parsed.pkg}.${parsed.refName} 的可达闭包，out-of-closure 包未落盘`]
   const visited = new Set<string>()
   const queue: string[] = [...entryMap.files]
@@ -1213,7 +1328,7 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
     const rawCode = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const code = stripSqlPlusCommands(rawCode)
     const relPath = storedFilePath(filePath, primaryBase)
-    parseFileAst(code, relPath, packages, subprograms, standaloneProcedures, warnings)
+    parseFileAst(code, relPath, packages, subprograms, standaloneProcedures, standaloneSlots, warnings)
     // 从已解析子程序的原始 directCalls/packageRefs 抽目标包，展开闭包。
     // directCalls/packageRefs 的 package 字段已 cleanName（大写），与 packageFileMap 键一致。
     // 每解析一个文件就扫全部子程序：直接调用边可能在 body 文件解析后才出现（spec 先入队时无 directCalls），
@@ -1239,5 +1354,5 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
     }
   }
 
-  return finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, tables, triggers, views, sequences, warnings, "ast")
+  return finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "ast")
 }

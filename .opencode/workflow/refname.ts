@@ -47,6 +47,20 @@ export function refNamesForPackage(procedureNames: string[]): string[] {
 }
 
 /**
+ * 由子程序自身的 `overloadIndex` 计算 refName：重载=`{name}__{idx}`，否则裸名。
+ *
+ * 与 {@link refNamesForPackage} 语义等价，但**顺序无关**——直接读子程序文件的 `overloadIndex`
+ * 字段（scanner 按源码声明序赋值，落盘进文件名 `{PKG}.{refName}.json`），不依赖数组顺序。
+ *
+ * 重载包在 ext4/APFS 上 `readdirSync` 顺序非字典序时，`refNamesForPackage(遇见序)` 会把
+ * `__1` 贴到 overloadIndex=2 的文件上，与依赖图 callGraph key（亦取 overloadIndex）错位。
+ * 故凡能拿到 `overloadIndex` 的场合应优先用本函数。
+ */
+export function refNameOf(sub: { name: string; overloadIndex: number | null }): string {
+  return sub.overloadIndex != null ? `${sub.name}__${sub.overloadIndex}` : sub.name
+}
+
+/**
  * 一个包所有**合法** refName 的集合（统一转大写，便于跨来源做大小写不敏感比对）。
  * 用于校验 callGraph 引用、subprogramMethods.oracleName 是否落在合法集合内。
  */

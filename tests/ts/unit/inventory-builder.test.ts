@@ -143,3 +143,31 @@ describe("buildInventoryFromIndex", () => {
     expect(sp.returnType).toBe("VARCHAR2")
   })
 })
+
+describe("buildInventoryFromIndex 失效依赖图缓存", () => {
+  // 修复前：buildDependencyGraph 模块级 cache 按 artifactsDir 常驻，buildInventoryFromIndex 重写
+  // subprograms/*.json 后不清缓存 → 同 session 重跑 generateInventory 修正 directCalls 后仍返回旧图。
+  it("重写 subprograms 后 buildDependencyGraph 反映新 directCalls（缓存被清，非旧图）", async () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "inv-cache-"))
+    const index = await scanSource(FIXTURE_TINY)
+    writeFileSync(join(cacheDir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
+
+    // 1) 首次构建：GET_ITEM_OBJ→GET_ITEM 边存在
+    buildInventoryFromIndex(cacheDir)
+    const { buildDependencyGraph } = await import("@workflow/dependency-graph")
+    const g1 = buildDependencyGraph(cacheDir)
+    expect(g1.callGraph["CORE_PKG.GET_ITEM_OBJ"] ?? []).toContain("CORE_PKG.GET_ITEM")
+
+    // 2) 改 inventory-index.json：抹掉 GET_ITEM_OBJ 的 directCalls，重写 subprograms
+    const idx2 = JSON.parse(readFileSync(join(cacheDir, "inventory-index.json"), "utf-8"))
+    for (const s of idx2.subprograms ?? []) {
+      if (s.name === "GET_ITEM_OBJ") s.directCalls = []
+    }
+    writeFileSync(join(cacheDir, "inventory-index.json"), JSON.stringify(idx2, null, 2), "utf-8")
+    buildInventoryFromIndex(cacheDir)  // 应清缓存
+
+    // 3) 再构建：若缓存已清，GET_ITEM_OBJ→GET_ITEM 边消失；若未清（旧图），边仍存在
+    const g2 = buildDependencyGraph(cacheDir)
+    expect(g2.callGraph["CORE_PKG.GET_ITEM_OBJ"] ?? []).not.toContain("CORE_PKG.GET_ITEM")
+  })
+})

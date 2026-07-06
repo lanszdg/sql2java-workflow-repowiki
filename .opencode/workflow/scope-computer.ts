@@ -17,7 +17,7 @@
  * dependency-graph.json / inventory-packages 数据并传入，以及把结果写入 run.metadata。
  */
 
-import { pkgOf, refNamesForPackage, parseQualified } from "./refname"
+import { pkgOf, refNameOf, parseQualified } from "./refname"
 
 // ── 宽松输入形态（来自 Zod 校验后的 dependency-graph.json / inventory-packages，但本模块不强耦合 schema）──
 
@@ -31,7 +31,7 @@ export interface InventoryPackageLike {
   packageName: string
   headerPath?: string | null
   bodyPath?: string | null
-  procedures: { name: string; type: string }[]
+  procedures: { name: string; type: string; overloadIndex?: number | null }[]
 }
 
 // ── mainEntry 解析 ──
@@ -107,9 +107,10 @@ export function resolveEntry(
     return { ok: false, error: `packages 数据包名 ${entryPkg.packageName} 与入口 ${parsed.pkg} 不匹配` }
   }
 
-  // 计算该包真实 refName 列表（与 callGraph key / FSD 文件名同口径）
-  const procNames = entryPkg.procedures.map(p => p.name)
-  const refNames = refNamesForPackage(procNames) // 与 procedures 数组同序
+  // 计算该包真实 refName 列表（与 callGraph key / FSD 文件名同口径）。
+  // 用 refNameOf(overloadIndex) 顺序无关——refNamesForPackage(遇见序) 在重载≥10 时
+  // __10<__2 会错位，且依赖 readdirSync 顺序，与依赖图 callGraph key 不一致。
+  const refNames = entryPkg.procedures.map(p => refNameOf({ name: p.name, overloadIndex: p.overloadIndex ?? null }))
   const upperToRefName = new Map<string, string>() // 大写 refName → 原始 refName
   for (const r of refNames) upperToRefName.set(r.toUpperCase(), r)
 
@@ -137,7 +138,7 @@ export function resolveEntry(
   // 3) 不存在
   return {
     ok: false,
-    error: `入口子程序 ${parsed.pkg}.${parsed.refName} 不在包 ${entryPkg.packageName} 的子程序集（现有: ${procNames.join(", ") || "无"}）`,
+    error: `入口子程序 ${parsed.pkg}.${parsed.refName} 不在包 ${entryPkg.packageName} 的子程序集（现有: ${refNames.join(", ") || "无"}）`,
   }
 }
 

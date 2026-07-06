@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
-import { refNamesForPackage } from "./refname"
+import { refNameOf, refNamesForPackage } from "./refname"
 
 // ── packages/{pkg}.json + subprograms/{pkg}.*.json ────────────────────────────
 
@@ -73,7 +73,10 @@ export function parseInventoryPackage(artifactsDir: string, pkg: string): Invent
       } catch { /* 跳过损坏 */ }
     }
   }
-  const refNames = refNamesForPackage(subprograms.map((s: any) => s.name))
+  // refName 取每个子程序文件的 overloadIndex（与文件名 {PKG}.{refName}.json 及依赖图 callGraph key 一致），
+  // 顺序无关。不用 refNamesForPackage(遇见序)：readdirSync().sort() 在重载≥10 时 __10<__2，且 ext4 上
+  // readdirSync 非字典序——会使 generateUnitSlices 的 inv.refNames.indexOf(rootRef) 命中错文件/返回 -1。
+  const refNames = subprograms.map((s: any) => refNameOf({ name: String(s?.name ?? ""), overloadIndex: s?.overloadIndex ?? null }))
   const headerPath = pkgInfo.headerPath ?? null
   const bodyPath = pkgInfo.bodyPath ?? null
   return { refNames, subprograms, pkgInfo, headerPath, bodyPath }

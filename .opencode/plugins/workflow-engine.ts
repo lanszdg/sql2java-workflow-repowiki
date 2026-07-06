@@ -843,7 +843,9 @@ function loadEntryPkgRaw(artifactsDir: string, pkg: string): InventoryPackageLik
     packageName: pkgInfo.packageName ?? pkg,
     headerPath: parsed.headerPath,
     bodyPath: parsed.bodyPath,
-    procedures: parsed.subprograms.map((s: any) => ({ name: s.name, type: s.type })),
+    // 透传 overloadIndex：scope-computer 用 refNameOf(overloadIndex) 解析入口 refName，
+    // 与依赖图 callGraph key / FSD 文件名同口径（refNamesForPackage(遇见序) 在重载≥10 时错位）。
+    procedures: parsed.subprograms.map((s: any) => ({ name: s.name, type: s.type, overloadIndex: s.overloadIndex ?? null })),
   }
 }
 

@@ -22,14 +22,15 @@ import {
 } from "./artifact-schemas"
 import { formatZodIssues } from "./engine-core"
 import { getLogger } from "./workflow-logger"
+import { refNameOf } from "./refname"
+import { clearDependencyGraphCache } from "./dependency-graph"
 import type {
   PackageInfo, SubprogramInfo, TableIndex, TriggerIndex, ViewIndex, SequenceIndex, InventoryIndex,
 } from "./plsql-scanner"
 
-/** 子程序文件名：重载用 {name}__序号（与 refname 规范一致），否则裸名 */
+/** 子程序文件名：{PKG}.{refName}.json，refName 复用单一真相源 refNameOf */
 function subprogramFileName(s: SubprogramInfo): string {
-  const base = s.overloadIndex !== null ? `${s.name}__${s.overloadIndex}` : s.name
-  return `${s.belongToPackage}.${base}.json`
+  return `${s.belongToPackage}.${refNameOf(s)}.json`
 }
 
 /**
@@ -46,6 +47,10 @@ export function buildInventoryFromIndex(artifactsDir: string): {
   if (!existsSync(indexPath)) {
     throw new Error(`inventory-index.json 不存在: ${indexPath}（scan 可能未运行）`)
   }
+  // 本函数重写 subprograms/*.json（含 directCalls），依赖图缓存（按 artifactsDir 常驻）随之失效——
+  // 否则同 session 内 agent 重跑 generateInventory 修正 directCalls 后，buildDependencyGraph 仍返回旧图，
+  // ensureRunScope 用过期闭包持久化错误 scope。生成失败也清：subprograms 可能已部分重写。
+  clearDependencyGraphCache(artifactsDir)
   const idx = JSON.parse(readFileSync(indexPath, "utf-8")) as InventoryIndex
 
   const packagesDir = join(artifactsDir, "packages")

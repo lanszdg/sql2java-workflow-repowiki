@@ -10,7 +10,8 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
-import { refNamesForPackage, pkgOf } from "./refname"
+import { refNameOf, pkgOf } from "./refname"
+import { getLogger } from "./workflow-logger"
 
 // ── 类型 ────────────────────────────────────────────────────────────────────────
 
@@ -50,24 +51,23 @@ export interface DependencyGraph {
   functionOwnership: Record<string, string>
 }
 
-// ── 子程序 refName ──────────────────────────────────────────────────────────────
-
-/** 由子程序文件名/overloadIndex 计算 refName：重载=`{name}__{idx}`，否则裸名 */
-function refNameOf(s: { name: string; overloadIndex: number | null }): string {
-  return s.overloadIndex !== null ? `${s.name}__${s.overloadIndex}` : s.name
-}
-
 // ── 读 subprograms/*.json ──────────────────────────────────────────────────────
 
 function readSubprograms(artifactsDir: string): SubprogramFile[] {
   const dir = join(artifactsDir, "subprograms")
   if (!existsSync(dir)) return []
   const out: SubprogramFile[] = []
-  for (const f of readdirSync(dir)) {
+  // .sort() 保证读取序确定（translationOrder/procedureOrder 等输出可复现）；
+  // refName 已由 refNameOf(overloadIndex) 顺序无关地计算，sort 仅为确定性。
+  for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".json")) continue
     try {
       out.push(JSON.parse(readFileSync(join(dir, f), "utf-8")) as SubprogramFile)
-    } catch { /* 跳过损坏文件 */ }
+    } catch (e: any) {
+      // 旧 dependency-graph.json 整文件 Zod 校验会硬失败；现在逐文件解析，损坏文件需显式告警，
+      // 否则该子程序的 directCalls 静默丢失，callGraph 缺边只在后续 review/verify 间接暴露。
+      getLogger().warn("[dependency-graph]", `subprograms/${f} 解析失败，已跳过: ${e?.message ?? e}`)
+    }
   }
   return out
 }
@@ -77,7 +77,7 @@ function readPackageNames(artifactsDir: string): string[] {
   const dir = join(artifactsDir, "packages")
   if (!existsSync(dir)) return []
   const names: string[] = []
-  for (const f of readdirSync(dir)) {
+  for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".json")) continue
     try {
       const p = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { packageName: string }
@@ -99,11 +99,12 @@ function buildRefIndex(subprograms: SubprogramFile[]): Map<string, RefIndexEntry
   }
   const result = new Map<string, RefIndexEntry>()
   for (const [pkg, subs] of byPkg) {
-    // 复用 refNamesForPackage 保证与 FSD/translation 命名一致（按名出现序，重载全部带序号）
-    const refNames = refNamesForPackage(subs.map(s => s.name))
-    const subprogIdx = subs.map((s, i) => ({
+    // refName 直接取每个子程序文件的 overloadIndex（scanner 按源码声明序赋值，落盘进文件名），
+    // 顺序无关——与 buildDependencyGraph 的 callGraph caller key（亦 refNameOf）一致。
+    // 不用 refNamesForPackage(遇见序)：readdirSync 在 ext4/APFS 上非字典序会使重载 refName 错位。
+    const subprogIdx = subs.map((s) => ({
       name: s.name,
-      refName: refNames[i],
+      refName: refNameOf(s),
       type: s.type.toLowerCase() === "function" ? "function" as const : "procedure" as const,
     }))
     const procNameToRefNames = new Map<string, string[]>()

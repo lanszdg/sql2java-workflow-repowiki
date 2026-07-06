@@ -53,10 +53,10 @@ const ENTRY_PKG: InventoryPackageLike = {
   bodyPath: "subdir1/order_pkg_body.sql",
   headerPath: "subdir1/order_pkg_spec.sql",
   procedures: [
-    { name: "process_order", type: "PROCEDURE" },
-    { name: "calc_total", type: "FUNCTION" },
-    { name: "get_param", type: "PROCEDURE" },
-    { name: "get_param", type: "PROCEDURE" }, // 重载 → get_param__1 / __2
+    { name: "process_order", type: "PROCEDURE", overloadIndex: null },
+    { name: "calc_total", type: "FUNCTION", overloadIndex: null },
+    { name: "get_param", type: "PROCEDURE", overloadIndex: 1 },
+    { name: "get_param", type: "PROCEDURE", overloadIndex: 2 },
   ],
 }
 
