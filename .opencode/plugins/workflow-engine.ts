@@ -734,6 +734,17 @@ export function claimGeneratedRoot(runId: string, artifactId: string, repoRoot: 
   return root
 }
 
+/** 取本 run 的 Java 项目输出根（单一真相源）。
+ *  scaffold 首次 claim 时持久化到 run.metadata.generatedRoot，后续阶段（含 resume）直接读，
+ *  不再各自 re-derive——否则 buildRuntimeContext（系统提示）与 dispatch projectRootLine（workOrder）
+ *  在 base 被他 run 占用、claimGeneratedRoot 返回 fallback 时会给 agent 两条不一致路径，
+ *  导致 scaffold 写错目录、resume 时子 agent 在 fallback 找不到产物。 */
+export function generatedRootFor(run: { runId: string; metadata: Record<string, unknown> }, artifactId: string, repoRoot: string = resolveProjectRoot()): string {
+  const md = run.metadata as Record<string, unknown>
+  if (typeof md.generatedRoot === "string" && md.generatedRoot) return md.generatedRoot
+  return resolveGeneratedRoot(run.runId, artifactId, repoRoot)
+}
+
 /** 构建 Runtime Context 文本块 */
 function buildRuntimeContext(run: WorkflowRun): string {
   const lines: string[] = []
@@ -744,15 +755,15 @@ function buildRuntimeContext(run: WorkflowRun): string {
   if (mainEntry) lines.push(`mainEntry: ${mainEntry}`)
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
-  // projectRoot: scaffold 及后续阶段从 plan.json 的 targetProject.artifactId 推导
-  // 使用绝对路径，避免 LLM 在不同工作目录下解析到错误位置。
-  // 定位基准：.workflow-artifacts 目录的父目录就是项目根目录。
+  // projectRoot: scaffold 及后续阶段从 plan.json 的 targetProject.artifactId 推导。
+  // 用 generatedRootFor（优先 metadata.generatedRoot，回退 resolveGeneratedRoot）与 dispatch
+  // projectRootLine、claimGeneratedRoot 一致——不能直接拼 generated/<artifactId>：base 被他 run
+  // 占用时 claimGeneratedRoot 返回 fallback，两处路径不一致会让 agent 写错目录。
   const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${run.runId}`, "plan")
   if (planArtifact) {
     const targetProject = planArtifact.targetProject as { artifactId: string } | undefined
     if (targetProject?.artifactId) {
-      const projectRoot = resolveProjectRoot()
-      lines.push(`projectRoot: ${join(projectRoot, "generated", targetProject.artifactId)}`)
+      lines.push(`projectRoot: ${generatedRootFor(run, targetProject.artifactId)}`)
     }
   }
 
@@ -1051,7 +1062,21 @@ export function buildShardedWorkerOrder(
   // 4) projectRoot（translate 在 plan 之后，有；analyze 在 plan 之前，无）
   const planArt = engine.loadArtifactJson(artDir, "plan")
   const artifactId = (planArt?.targetProject as any)?.artifactId
-  const projectRoot = artifactId ? (phase === "scaffold" ? claimGeneratedRoot(run.runId, artifactId) : resolveGeneratedRoot(run.runId, artifactId)) : null
+  // scaffold 首次 claim（建目录+写 marker）并持久化到 metadata.generatedRoot；后续阶段读单一真相源。
+  // 各阶段不再各自 resolveGeneratedRoot，避免与 buildRuntimeContext 不一致。
+  let projectRoot: string | null = null
+  if (artifactId) {
+    const md = run.metadata as Record<string, unknown>
+    if (typeof md.generatedRoot === "string" && md.generatedRoot) {
+      projectRoot = md.generatedRoot
+    } else if (phase === "scaffold") {
+      projectRoot = claimGeneratedRoot(run.runId, artifactId)
+      md.generatedRoot = projectRoot
+      engine.persist(run)
+    } else {
+      projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+    }
+  }
   const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
   const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
   const mainEntryLine = mainEntry ? `- mainEntry: \`${mainEntry}\`` : ""

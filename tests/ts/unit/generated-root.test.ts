@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { resolveGeneratedRoot, claimGeneratedRoot } from "@plugins/workflow-engine"
+import { resolveGeneratedRoot, claimGeneratedRoot, generatedRootFor } from "@plugins/workflow-engine"
 
 const MARKER = ".sql2java-run-id"
 let repo: string
@@ -54,5 +54,20 @@ describe("resolveGeneratedRoot / claimGeneratedRoot", () => {
     expect(root).toBe(join(repo, "generated", "mfg-erp-run-A"))
     // 遗留文件原样保留（不删除、不污染）
     expect(existsSync(join(legacy, "stale.java"))).toBe(true)
+  })
+
+  it("scaffold claim 后持久化 metadata.generatedRoot，后续阶段读单一真相源（base 被占仍返回 fallback）", () => {
+    // run-A 先占 base
+    claimGeneratedRoot("run-A", "mfg-erp", repo)
+    // run-B scaffold claim → base 被占 → fallback，dispatch 持久化到 metadata
+    const claimedB = claimGeneratedRoot("run-B", "mfg-erp", repo)
+    expect(claimedB).toBe(join(repo, "generated", "mfg-erp-run-B"))
+    const runB = { runId: "run-B", metadata: { generatedRoot: claimedB } }
+    // 后续阶段（含 resume）读 metadata.generatedRoot，不再 re-derive（即使 base 被占也不返回 base）
+    expect(generatedRootFor(runB, "mfg-erp")).toBe(claimedB)
+    expect(generatedRootFor(runB, "mfg-erp")).not.toBe(join(repo, "generated", "mfg-erp"))
+    // 旧 run（metadata 无 generatedRoot）回退 resolveGeneratedRoot
+    const runC = { runId: "run-C", metadata: {} }
+    expect(generatedRootFor(runC, "mfg-erp", repo)).toBe(resolveGeneratedRoot("run-C", "mfg-erp", repo))
   })
 })
