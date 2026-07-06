@@ -175,4 +175,60 @@ describe("engine-fix-loop", () => {
       }
     })
   })
+
+  // GLOBAL 是未归因到 inventory 包的哨兵（非可修复包）。D12「必须覆盖所有失败包」不得把
+  // GLOBAL 纳入 failedPackages，否则与「fixedPackages 必须在 inventory 中」自相矛盾→死循环。
+  describe("D12 GLOBAL 哨兵不纳入 fix 范围", () => {
+    it("summary 含 GLOBAL passed:false → fixedPackages 不含 GLOBAL 也不被拒", () => {
+      const ctx = createEngineWithTempDir()
+      try {
+        setupAtReview(ctx, "fix-global-001")
+        writeArtifact(ctx.dir, "fix-global-001", "inventory.json", makeInventory())
+        writeArtifact(ctx.dir, "fix-global-001", "review-summary.json", makeReviewSummary({
+          allPassed: false,
+          packageResults: [
+            { packageName: "CORE_PKG", passed: false, score: 50, mustFixCount: 1 },
+            { packageName: "GLOBAL", passed: false, score: 0, mustFixCount: 0 },
+          ],
+          totalMustFix: 1,
+          totalTodosRemaining: 0,
+        }))
+        ctx.engine.advance("fix-global-001") // → fix
+
+        // fix.json 只修 CORE_PKG（不修 GLOBAL）→ D12 应通过（GLOBAL 排除出 failedPackages）
+        writeArtifact(ctx.dir, "fix-global-001", "fix.json", makeFixArtifact({ fixedPackages: ["CORE_PKG"] }))
+        const result = ctx.engine.advance("fix-global-001", { result: "passed" })
+        expect(result.rejected).toBe(false)
+        expect(result.run.currentPhase).toBe("review")
+      } finally {
+        ctx.cleanup()
+      }
+    })
+
+    it("fix.json 含 GLOBAL 仍被拒（GLOBAL 不在 inventory，check A）", () => {
+      const ctx = createEngineWithTempDir()
+      try {
+        setupAtReview(ctx, "fix-global-002")
+        writeArtifact(ctx.dir, "fix-global-002", "inventory.json", makeInventory())
+        writeArtifact(ctx.dir, "fix-global-002", "review-summary.json", makeReviewSummary({
+          allPassed: false,
+          packageResults: [
+            { packageName: "CORE_PKG", passed: false, score: 50, mustFixCount: 1 },
+            { packageName: "GLOBAL", passed: false, score: 0, mustFixCount: 0 },
+          ],
+          totalMustFix: 1,
+          totalTodosRemaining: 0,
+        }))
+        ctx.engine.advance("fix-global-002") // → fix
+
+        // fix.json 含 GLOBAL → check A 拒（invalid package names not in inventory: GLOBAL）
+        writeArtifact(ctx.dir, "fix-global-002", "fix.json", makeFixArtifact({ fixedPackages: ["CORE_PKG", "GLOBAL"] }))
+        const rejected = ctx.engine.advance("fix-global-002", { result: "passed" })
+        expect(rejected.rejected).toBe(true)
+        expect(rejected.rejectionReason).toMatch(/not in inventory/i)
+      } finally {
+        ctx.cleanup()
+      }
+    })
+  })
 })

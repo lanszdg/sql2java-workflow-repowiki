@@ -462,6 +462,14 @@ function buildCoverage(artifactsDir: string, projectRoot: string, packages: stri
   }
   if (classes.length === 0) return noop("jacoco.xml 无 class 数据，覆盖率统计已跳过")
 
+  // 应用覆盖率排除策略：beans/Application/Config/infrastructure 等无业务逻辑类不计入门控，
+  // 避免数据载体类归因到 GLOBAL 后拉低覆盖率误伤 allPassed（与 coverage-gaps.md 报告同源）。
+  const businessClasses = classes.filter(c => excludeReason(c.relPath) === null)
+  if (businessClasses.length === 0) {
+    return noop("jacoco.xml 全部 class 均被覆盖率排除策略排除（beans/Config/Application/infrastructure），无业务类可统计")
+  }
+  classes = businessClasses
+
   // pkg → files 缓存（复用 locatePkgFiles，按 Oracle 包归因）
   const pkgFilesCache = new Map<string, PkgFiles>()
   for (const pkg of packages) pkgFilesCache.set(pkg.toUpperCase(), locatePkgFiles(artifactsDir, pkg, warnings))
@@ -501,11 +509,13 @@ function buildCoverage(artifactsDir: string, projectRoot: string, packages: stri
   }
 }
 
-/** 判断一个 .java 相对路径是否被 pom jacoco <excludes> 排除，返回排除原因或 null */
+/** 项目覆盖率排除策略：beans/Application/Config/infrastructure 等无业务逻辑类不计入覆盖率。
+ *  供覆盖率门控（buildCoverage）与报告（scanExcludedClasses → coverage-gaps.md）共用，
+ *  避免数据载体类（Bean/Dto 等）拉低 GLOBAL 覆盖率误伤 allPassed。返回排除原因或 null。 */
 function excludeReason(relPath: string): string | null {
   if (relPath.includes("/common/infrastructure/")) return "基础设施层（common/infrastructure，统一异常/日志/工具）"
   const base = relPath.slice(relPath.lastIndexOf("/") + 1)
-  if (relPath.includes("/beans/") && base.endsWith("Bean.java")) return "数据对象（beans/*Bean，纯数据载体）"
+  if (relPath.includes("/beans/")) return "数据对象（beans/，纯数据载体：Bean/Dto 等）"
   if (base.endsWith("Config.java")) return "配置类（*Config，无业务逻辑）"
   if (base.endsWith("Application.java")) return "启动类（*Application，框架入口）"
   return null

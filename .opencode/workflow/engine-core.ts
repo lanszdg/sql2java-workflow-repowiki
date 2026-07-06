@@ -1554,9 +1554,13 @@ export class WorkflowEngine {
     const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean; staticPassed?: boolean | null }> }).packageResults ?? []
     // 失败包 = 语义未过(!passed) 或 静态未过(staticPassed===false)。后者由 review 静态重构引入
     // （review.json 纯语义、静态 finding 走独立通道），若不纳入 fix 范围会导致静态问题永不修复+不重扫→死循环。
+    // GLOBAL 是未归因到 inventory 包的哨兵（非可修复包），排除出 failedPackages，避免
+    // D12「必须覆盖所有失败包」与「fixedPackages 必须在 inventory 中」自相矛盾导致死循环。
     const failedPackages = new Set(
       pkgResults
-        .filter(p => typeof p.packageName === "string" && p.packageName && (!p.passed || p.staticPassed === false))
+        .filter(p => typeof p.packageName === "string" && p.packageName
+          && p.packageName.toUpperCase() !== "GLOBAL"
+          && (!p.passed || p.staticPassed === false))
         .map(p => p.packageName.toUpperCase())
     )
     const fixedUpper = new Set(

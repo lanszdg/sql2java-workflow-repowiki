@@ -199,4 +199,68 @@ describe("buildVerifySummary — JaCoCo 覆盖率", () => {
     expect(md).toContain("GLOBAL")
     expect(md).toContain("com.example.orphan.Orphan")
   })
+
+  it("beans/Application/Config 等排除类不计入覆盖率门控，不产生 GLOBAL 不拉低 allPassed", () => {
+    setup(["PKG_A"], { PKG_A: ["src/main/java/com/example/a/AAggregate.java"] })
+    writeCompileLog("BUILD SUCCESS")
+    writeTestLog("Tests run: 2, Failures: 0, Errors: 0, Skipped: 0")
+    // aggregate 全覆盖 + 一批 0 覆盖的排除类（bean / Application / Config / infrastructure）
+    const xml = `<?xml version="1.0"?>
+<report name="proj">
+  <package name="com/example/a">
+    <class name="com/example/a/AAggregate" sourcefilename="AAggregate.java">
+      <counter type="LINE" missed="0" covered="5"/>
+      <counter type="BRANCH" missed="0" covered="4"/>
+    </class>
+    <sourcefile name="AAggregate.java">
+      <line nr="10" mi="0" ci="2" mb="0" cb="2"/>
+      <line nr="20" mi="0" ci="3" mb="0" cb="2"/>
+    </sourcefile>
+  </package>
+  <package name="com/example/beans">
+    <class name="com/example/beans/OrderBean" sourcefilename="OrderBean.java">
+      <counter type="LINE" missed="3" covered="0"/>
+      <counter type="BRANCH" missed="0" covered="0"/>
+    </class>
+    <sourcefile name="OrderBean.java">
+      <line nr="5" mi="3" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+  </package>
+  <package name="com/example">
+    <class name="com/example/AppConfig" sourcefilename="AppConfig.java">
+      <counter type="LINE" missed="2" covered="0"/>
+    </class>
+    <sourcefile name="AppConfig.java">
+      <line nr="3" mi="2" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+    <class name="com/example/AppApplication" sourcefilename="AppApplication.java">
+      <counter type="LINE" missed="4" covered="0"/>
+    </class>
+    <sourcefile name="AppApplication.java">
+      <line nr="5" mi="4" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+  </package>
+  <package name="com/example/common/infrastructure">
+    <class name="com/example/common/infrastructure/TranFailException" sourcefilename="TranFailException.java">
+      <counter type="LINE" missed="2" covered="0"/>
+    </class>
+    <sourcefile name="TranFailException.java">
+      <line nr="7" mi="2" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+  </package>
+</report>`
+    writeJacocoXml(xml)
+    const r = buildVerifySummary(dir)
+    // 排除类不计入门控，只剩 aggregate 全覆盖 → passed
+    expect(r.coveragePassed).toBe(true)
+    expect(r.allPassed).toBe(true)
+    const summary = JSON.parse(readFileSync(join(dir, "verify-summary.json"), "utf-8"))
+    expect(summary.coverage.passed).toBe(true)
+    // 排除类不归因到 GLOBAL
+    expect(summary.packageResults.find((p: any) => p.packageName === "GLOBAL")).toBeUndefined()
+    expect(summary.coverage.packageCoverage.find((p: any) => p.packageName === "GLOBAL")).toBeUndefined()
+    // 整体覆盖率 = aggregate 100%（排除类不计入分母）
+    expect(summary.coverage.lineRate).toBe(1)
+    expect(summary.coverage.branchRate).toBe(1)
+  })
 })
