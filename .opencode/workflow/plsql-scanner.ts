@@ -211,22 +211,20 @@ function ctxText(ctx: ParserRuleContext | undefined | null): string {
  * （SQL*Plus 终止符）止。资源里单元均以 `/` 结尾。
  */
 function stripSqlPlusCommands(code: string): string {
-  let inUnit = false
-  // 括号深度：SQL*Plus 命令是顶层语句，永不出现在括号内。CREATE TABLE 列定义在 (...) 内，
-  // 列名可能恰好是 EXIT/SET/COLUMN 等 SQL*Plus 关键字（如 `EXIT VARCHAR2(10),`）——若按行首关键字
-  // 剥行会误删列。故括号内一律不剥。
+  // 仅剥离 grammar 不认的纯顶层 SQL*Plus 命令。grammar 认的（PROMPT/REM/@@/@/SET/EXIT/QUIT/
+  // SHOW/TIMING/CLEAR）交给 antlr4 的 sql_plus_command 规则——由语法上下文区分 SQL*Plus 的 SET 与
+  // PL/SQL 的 UPDATE SET、SQL*Plus 的 EXIT 与 PL/SQL 的 EXIT WHEN，无需 unitStart/unitEnd 单元边界
+  // 判断。旧版用边界正则模拟这个区分，因不容忍 /*EDITIONABLE*/ 等内联注释而 inUnit 全程 false，
+  // 误把单元内 EXIT WHEN / UPDATE SET 当 SQL*Plus 命令剥掉 → 语法断裂 → 后续子程序 bodyLocation=null。
+  // 此处所列命令（SPOOL/DEFINE/...）从不出现在 PL/SQL 单元内，只按行首关键字 + 括号外判断即可。
+  // 括号内不剥：CREATE TABLE 列定义里可能恰好是这些词作列名（括号深度跨行累积）。
+  const sqlPlusLine = /^(SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE)\b/i
   let parenDepth = 0
-  const unitStart = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i
-  const unitEnd = /^\s*\/\s*$/
-  const sqlPlusLine = /^(prompt|@@?\s?\S|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR|SET)\b/i
   return code
     .split("\n")
     .map(line => {
       const trimmed = line.trimStart()
-      if (unitStart.test(trimmed)) inUnit = true
-      else if (inUnit && unitEnd.test(trimmed)) inUnit = false
-      // 单元内保留（SET/EXIT 等是 PL/SQL）；单元外且括号外剥 SQL*Plus 命令
-      if (!inUnit && parenDepth === 0 && sqlPlusLine.test(trimmed)) {
+      if (parenDepth === 0 && sqlPlusLine.test(trimmed)) {
         parenDepth += parenDelta(line)
         return ""
       }
