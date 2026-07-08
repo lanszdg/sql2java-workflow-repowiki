@@ -211,3 +211,223 @@ end;`
     expect(coreSubs.length, "CORE_PKG 子程序不因 spec/body 分文件而重复").toBe(1)
   }, 30000)
 })
+
+// ── 方案 C 断传递：const-leaf 包作叶子，2-hop const 不传递扫描；const-ref 同时被 directCall 则升级为 call-closure ──
+//
+// CALLER_PKG.ENTRY_PROC:
+//   - packageRef MID_PKG.C_MID（1-hop const-leaf，不被调用）
+//   - packageRef SHARED_PKG.C_SHARED + directCall SHARED_PKG.DO_SHARED（SHARED_PKG 升级为 call-closure）
+// MID_PKG.UNUSED_MID 体里 packageRef LEAF_PKG.C_LEAF（2-hop，断传递不应扫描 LEAF_PKG）
+// SHARED_PKG.DO_SHARED directCall DEEP_PKG.DO_DEEP（call-closure 传递可达）
+const CALLER_PKG_SQL = `create or replace package caller_pkg as
+  procedure entry_proc(p in number);
+end;
+/
+create or replace package body caller_pkg as
+  procedure entry_proc(p in number) is
+    v_mid    number := mid_pkg.c_mid;
+    v_shared number := shared_pkg.c_shared;
+  begin
+    shared_pkg.do_shared(p);
+  end;
+end;
+/`
+
+const MID_PKG_SQL = `create or replace package mid_pkg as
+  c_max constant number := 100;
+  procedure unused_mid;
+end;
+/
+create or replace package body mid_pkg as
+  procedure unused_mid is
+    v number := leaf_pkg.c_leaf;
+  begin
+    null;
+  end;
+end;
+/`
+
+const LEAF_PKG_SQL = `create or replace package leaf_pkg as
+  c_leaf constant number := 1;
+end;
+/
+create or replace package body leaf_pkg as
+end;
+/`
+
+const SHARED_PKG_SQL = `create or replace package shared_pkg as
+  c_shared constant number := 5;
+  procedure do_shared(p in number);
+end;
+/
+create or replace package body shared_pkg as
+  procedure do_shared(p in number) is
+  begin
+    deep_pkg.do_deep(p);
+  end;
+end;
+/`
+
+const DEEP_PKG_SQL = `create or replace package deep_pkg as
+  procedure do_deep(p in number);
+end;
+/
+create or replace package body deep_pkg as
+  procedure do_deep(p in number) is
+  begin
+    null;
+  end;
+end;
+/`
+
+describe("scanSourceLazy 断传递（方案 C）", () => {
+  let srcDir2: string
+  let artDir2: string
+
+  beforeAll(() => {
+    srcDir2 = join(dir, "src2")
+    artDir2 = join(dir, "run2")
+    mkdirSync(srcDir2, { recursive: true })
+    mkdirSync(artDir2, { recursive: true })
+    writeFileSync(join(srcDir2, "caller_pkg.sql"), CALLER_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir2, "mid_pkg.sql"), MID_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir2, "leaf_pkg.sql"), LEAF_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir2, "shared_pkg.sql"), SHARED_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir2, "deep_pkg.sql"), DEEP_PKG_SQL, "utf-8")
+  }, 60000)
+
+  afterAll(() => { clearDependencyGraphCache() })
+
+  it("2-hop const 包不传递扫描；1-hop const-leaf 与 call-closure 传递包都扫", async () => {
+    const lazy = await scanSourceLazy({ sourcePath: srcDir2, mainEntry: "CALLER_PKG.ENTRY_PROC" })
+    const names = new Set(lazy.packages.map(p => p.packageName))
+    expect(names.has("CALLER_PKG"), "入口包").toBe(true)
+    expect(names.has("MID_PKG"), "1-hop const-leaf 包扫描").toBe(true)
+    expect(names.has("SHARED_PKG"), "call-closure 包扫描").toBe(true)
+    expect(names.has("DEEP_PKG"), "call-closure 传递包扫描").toBe(true)
+    expect(names.has("LEAF_PKG"), "2-hop const 包不传递扫描").toBe(false)
+  }, 30000)
+
+  it("const-ref 同时被 directCall → 升级为 call-closure（其 directCalls 被跟随，不卡在 const-leaf）", async () => {
+    const lazy = await scanSourceLazy({ sourcePath: srcDir2, mainEntry: "CALLER_PKG.ENTRY_PROC" })
+    writeFileSync(join(artDir2, "inventory-index.json"), JSON.stringify(lazy, null, 2), "utf-8")
+    buildInventoryFromIndex(artDir2)
+    const g = buildDependencyGraph(artDir2)
+    const cl = scopeClosure({
+      callGraph: g.callGraph,
+      packageDependency: g.packageDependency,
+      functionOwnership: g.functionOwnership,
+    } as any, "CALLER_PKG.ENTRY_PROC")
+
+    // SHARED_PKG 被调用 → call-closure → 进 scopeUnits；其 directCall DEEP_PKG 传递可达
+    expect(cl.scopeUnits.some(u => u.startsWith("SHARED_PKG.DO_SHARED")),
+      "SHARED_PKG 是 call-closure（被调用，不卡在 const-leaf）").toBe(true)
+    expect(cl.scopeUnits.some(u => u.startsWith("DEEP_PKG.DO_DEEP")),
+      "DEEP_PKG 经 SHARED_PKG 传递调用可达").toBe(true)
+    // MID_PKG 仅 const 引用、未被调用 → const-leaf → 不进 scopeUnits，但进 scopePackages（1-hop）
+    expect(cl.scopeUnits.some(u => u.startsWith("MID_PKG.")),
+      "MID_PKG 是 const-leaf 不进 scopeUnits").toBe(false)
+    expect(cl.scopePackages, "scope 含 1-hop const-leaf MID_PKG").toContain("MID_PKG")
+    // LEAF_PKG 2-hop：断传递后不扫描 → 不在 packageDependency → 不进 scopePackages
+    expect(cl.scopePackages, "scope 不含 2-hop const LEAF_PKG").not.toContain("LEAF_PKG")
+  }, 30000)
+})
+
+// ── 跨波次升级：const-leaf 包先被扫（已 visited），后波次经中间包 directCall 触发升级为 call-closure ──
+// 验证 fixpoint 读整个 pool + while(changed) 能补收已 visited 升级包的 directCalls（候选#1 漏收顾虑）。
+//
+// XCALLER_PKG.ENTRY: packageRef MIDC_PKG.C（→ constLeaf，wave2 扫）；directCall BASE2_PKG.DO（→ callClosure）
+// BASE2_PKG.DO: directCall MIDC_PKG.USE（wave2 扫 BASE2 时才发现 → 升级 MIDC 为 callClosure）
+// MIDC_PKG.USE: directCall DEEP2_PKG.DO_DEEP（升级后须被 fixpoint 补收 → DEEP2 wave3 扫）
+const XCALLER_PKG_SQL = `create or replace package xcaller_pkg as
+  procedure entry(p in number);
+end;
+/
+create or replace package body xcaller_pkg as
+  procedure entry(p in number) is
+    v number := midc_pkg.c;
+  begin
+    base2_pkg.do(p);
+  end;
+end;
+/`
+
+const BASE2_PKG_SQL = `create or replace package base2_pkg as
+  procedure do(p in number);
+end;
+/
+create or replace package body base2_pkg as
+  procedure do(p in number) is
+  begin
+    midc_pkg.use(p);
+  end;
+end;
+/`
+
+const MIDC_PKG_SQL = `create or replace package midc_pkg as
+  c constant number := 7;
+  procedure use(p in number);
+end;
+/
+create or replace package body midc_pkg as
+  procedure use(p in number) is
+  begin
+    deep2_pkg.do_deep(p);
+  end;
+end;
+/`
+
+const DEEP2_PKG_SQL = `create or replace package deep2_pkg as
+  procedure do_deep(p in number);
+end;
+/
+create or replace package body deep2_pkg as
+  procedure do_deep(p in number) is
+  begin
+    null;
+  end;
+end;
+/`
+
+describe("scanSourceLazy 跨波次升级（const-leaf → call-closure）", () => {
+  let srcDir3: string
+  let artDir3: string
+
+  beforeAll(() => {
+    srcDir3 = join(dir, "src3")
+    artDir3 = join(dir, "run3")
+    mkdirSync(srcDir3, { recursive: true })
+    mkdirSync(artDir3, { recursive: true })
+    writeFileSync(join(srcDir3, "xcaller_pkg.sql"), XCALLER_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir3, "base2_pkg.sql"), BASE2_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir3, "midc_pkg.sql"), MIDC_PKG_SQL, "utf-8")
+    writeFileSync(join(srcDir3, "deep2_pkg.sql"), DEEP2_PKG_SQL, "utf-8")
+  }, 60000)
+
+  afterAll(() => { clearDependencyGraphCache() })
+
+  it("已 visited 的 const-leaf 包被后波次 directCall 升级后，其 directCalls 被 fixpoint 补收", async () => {
+    const lazy = await scanSourceLazy({ sourcePath: srcDir3, mainEntry: "XCALLER_PKG.ENTRY" })
+    const names = new Set(lazy.packages.map(p => p.packageName))
+    expect(names.has("XCALLER_PKG"), "入口").toBe(true)
+    expect(names.has("BASE2_PKG"), "中间 call-closure 包").toBe(true)
+    expect(names.has("MIDC_PKG"), "const-leaf 升级为 call-closure").toBe(true)
+    // 关键：MIDC_PKG 先以 const-leaf 扫描（wave2 visited），wave2 fixpoint 升级后其 directCall
+    // 到 DEEP2_PKG 必须被补收 → DEEP2_PKG 入队 wave3 扫描。若 fixpoint 漏收已 visited 升级包，DEEP2 缺失。
+    expect(names.has("DEEP2_PKG"), "升级包的 directCalls 被 fixpoint 补收 → DEEP2 扫描").toBe(true)
+
+    // scope 链路：MIDC_PKG 升级为 call-closure → MIDC_PKG.USE 进 scopeUnits；DEEP2_PKG.DO_DEEP 传递可达
+    writeFileSync(join(artDir3, "inventory-index.json"), JSON.stringify(lazy, null, 2), "utf-8")
+    buildInventoryFromIndex(artDir3)
+    const g = buildDependencyGraph(artDir3)
+    const cl = scopeClosure({
+      callGraph: g.callGraph,
+      packageDependency: g.packageDependency,
+      functionOwnership: g.functionOwnership,
+    } as any, "XCALLER_PKG.ENTRY")
+    expect(cl.scopeUnits.some(u => u.startsWith("MIDC_PKG.USE")),
+      "MIDC_PKG 升级后 USE 进 scopeUnits").toBe(true)
+    expect(cl.scopeUnits.some(u => u.startsWith("DEEP2_PKG.DO_DEEP")),
+      "DEEP2_PKG 经升级包传递可达").toBe(true)
+  }, 30000)
+})

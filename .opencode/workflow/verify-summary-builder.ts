@@ -185,7 +185,7 @@ function readProjectRoot(artifactsDir: string): string {
 
 /**
  * 期望覆盖包集：scoped run 用 metadata.scopePackages（lazy inventory 下 inventory.packageNames
- * 是入口包闭包 ⊇ scope，verify 只须校验 scope 闭包被翻译/验证）；非 scoped 回退 inventory.packageNames。
+ * 与 scope 同源——call-closure ∪ 1-hop const-leaf，断传递后两者相等）；非 scoped 回退 inventory.packageNames。
  */
 function readPackageList(artifactsDir: string): string[] {
   const scopePkgs = readScopePackagesFromArtifacts(artifactsDir)

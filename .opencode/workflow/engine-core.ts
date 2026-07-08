@@ -29,8 +29,8 @@ import { readScope } from "./scope-computer"
  * 从 artifactsDir/run.json 读 scoped run 的「期望覆盖包」集（metadata.scopePackages）。
  * 非 scoped run（无 scopePackages）返回 null，调用方回退到 inventory.packageNames。
  *
- * lazy inventory 下 inventory.json.packageNames 是入口包闭包（⊇ scope.scopePackages），
- * review/verify 的覆盖检查须以 scope.scopePackages 为期望集，否则会误报闭包内但 scope 外的包「缺失」。
+ * lazy inventory 下 inventory.json.packageNames 与 scope.scopePackages 同源（call-closure ∪
+ * 1-hop const-leaf，断传递后两者相等），review/verify 的覆盖检查以 scope.scopePackages 为期望集。
  */
 export function readScopePackagesFromArtifacts(artifactsDir: string): string[] | null {
   try {

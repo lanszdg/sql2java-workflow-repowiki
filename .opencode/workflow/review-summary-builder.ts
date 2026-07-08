@@ -49,8 +49,8 @@ const BLOCKING_SEVERITY = new Set(["critical", "major"])
 
 /**
  * 检查 review.json 是否覆盖「期望包集」；缺则返回缺失列表（大小写不敏感）。
- * 期望集：scoped run 用 metadata.scopePackages（lazy inventory 下 inventory.packageNames
- * 是入口包闭包 ⊇ scope，须以 scope 为准，否则闭包内但 scope 外的包会被误报缺失）；
+ * 期望集：scoped run 用 metadata.scopePackages（lazy inventory 下 inventory.packageNames 与
+ * scope 同源——call-closure ∪ 1-hop const-leaf，断传递后两者相等；以 scope 为准）；
  * 非 scoped run 回退 inventory.json.packageNames。
  */
 function findMissingPackages(artifactsDir: string, presentPackages: string[]): string[] {

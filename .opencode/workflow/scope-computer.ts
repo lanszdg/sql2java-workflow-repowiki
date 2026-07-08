@@ -6,9 +6,10 @@
  *   - `scopeUnits`：沿 `callGraph`（子程序级调用边）正向 BFS 到达的子程序 → 映射到 unit。
  *     unit = PROCEDURE 自身，或 owned FUNCTION 的 owner unit（被拥有的 FUNCTION 折叠进 owner），
  *     孤儿 FUNCTION 自身成 unit。**只含被调用的 PROC/FUNC**。
- *   - `scopePackages`：`scopeUnits` 所属包 ∪ 从这些包沿 `packageDependency`（包级引用，含
- *     常量/类型/跨包调用）正向 BFS 到达的所有包。仅常量/类型被引用、无 PROC 被调用的包
- *     进 `scopePackages`（scaffold 出壳）但不进 `scopeUnits`（不译过程体）。
+ *   - `scopePackages`：`scopeUnits` 所属包 ∪ 这些包沿 `packageDependency` **1-hop** 直接引用的
+ *     包（常量/类型/跨包调用）。仅常量/类型被引用、无 PROC 被调用的包进 `scopePackages`
+ *     （scaffold 出壳）但不进 `scopeUnits`（不译过程体）。**不传递**——与 scanSourceLazy 的
+ *     断传递一致（方案 C）：const-leaf 包不再传递展开，避免 const/type 引用图爆炸到上千包。
  *
  * 设计见 [[per-unit-hard-isolation]] / plan「过程级入口闭包翻译」。复用 refname.ts
  * 单一真相源（refName 规范、pkgOf/refOf/parseQualified），与 callGraph key 口径一致。
@@ -175,7 +176,7 @@ function finalize(
 export interface ClosureResult {
   /** 闭包 unit 集合 `PKG.refName`（含入口 unit + 全部被调用 unit） */
   scopeUnits: string[]
-  /** 闭包包集合（scopeUnits 所属包 ∪ 常量/类型/跨包引用可达包） */
+  /** 闭包包集合（scopeUnits 所属包 ∪ 它们 1-hop 直接引用的 const/type/跨包调用包） */
   scopePackages: string[]
   /** 入口 unit（owned FUNCTION → owner） */
   entryUnit: string
@@ -186,7 +187,8 @@ export interface ClosureResult {
  * 从入口子程序计算闭包。纯函数。
  *
  * scopeUnits：callGraph 正向 BFS（visited 防环）→ 子程序 → 映射 unit（owned FUNCTION 折叠进 owner）。
- * scopePackages：scopeUnits 所属包作种子 → packageDependency 正向 BFS（传递，含常量/类型引用）。
+ * scopePackages：scopeUnits 所属包作种子 → packageDependency **1-hop** 平铺（不传递，与
+ * scanSourceLazy 断传递一致；const-leaf 包无出边，传递也自然终止，此处显式 1-hop 作防御）。
  */
 export function computeClosure(analysis: AnalysisLike, entrySubprogram: string): ClosureResult {
   const callGraph = analysis.callGraph ?? {}
@@ -223,23 +225,19 @@ export function computeClosure(analysis: AnalysisLike, entrySubprogram: string):
   // entryUnit 修正：入口若为 owned FUNCTION，取 owner unit
   const entryUnit = functionOwnership[entrySubprogram] ?? entrySubprogram
 
-  // 3) 包级 BFS：种子 = scopeUnits 所属包
+  // 3) 包级 1-hop：种子 = scopeUnits 所属包；种子包沿 packageDependency 直接引用的包纳入。
+  //    **不传递**（方案 C）：const-leaf 包不再展开，避免 const/type 引用图爆炸。与 scanSourceLazy
+  //    断传递一致——const-leaf 包的 packageRefs 在 scanner 后过滤已被丢弃，packageDependency 本就
+  //    无 1-hop 以上的边；此处显式单层平铺锁死边界，防御后续误改 re-enable 传递。
   const seedPkgs = new Set<string>()
   for (const u of scopeUnitsSet) seedPkgs.add(pkgOf(u))
 
   const scopePackagesSet = new Set<string>(seedPkgs)
-  const pkgQueue: string[] = [...seedPkgs]
-  let pHead = 0
-  while (pHead < pkgQueue.length) {
-    const cur = pkgQueue[pHead++]
-    const deps = packageDependency[cur]
+  for (const p of seedPkgs) {
+    const deps = packageDependency[p]
     if (!Array.isArray(deps)) continue
     for (const dep of deps) {
-      if (typeof dep !== "string" || dep.length === 0) continue
-      if (!scopePackagesSet.has(dep)) {
-        scopePackagesSet.add(dep)
-        pkgQueue.push(dep)
-      }
+      if (typeof dep === "string" && dep.length > 0) scopePackagesSet.add(dep)
     }
   }
 
