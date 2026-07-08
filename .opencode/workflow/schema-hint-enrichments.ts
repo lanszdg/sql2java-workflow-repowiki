@@ -165,10 +165,6 @@ export const CROSS_SCHEMA_HINTS: Record<string, string[]> = {
  * 测试会校验枚举值匹配。
  */
 export const COMMON_PITFALLS: Record<string, string[]> = {
-  "inventory-index": [
-    'scannerUsed 自动 normalize 为小写，"AST"/"Regex" 等任意大小写均可通过',
-    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
-  ],
   inventory: [
     'optional 字段（defaultValue/bodyPath/returnType/headerPath/ddlFile 等）可省略或写 null，均可通过校验',
     'parameters[].mode 自动 normalize 为大写："in"/"In"/"IN" 均等价于 "IN"，"in out"/"IN OUT" 均等价于 "IN OUT"',

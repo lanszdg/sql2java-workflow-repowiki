@@ -15,8 +15,6 @@ export const STRUCTURAL_FIX_GUIDANCE =
 
 /** 阶段 → 针对性引导语 */
 export const PHASE_REJECTION_GUIDANCE: Record<string, string> = {
-  "inventory-index":
-    "⚠️ 此错误通常意味着预扫描不完整。请重新执行 AST/regex 扫描，确保覆盖所有 Oracle 包，而非仅修补 JSON 字段。",
   "inventory":
     "⚠️ 此错误通常意味着 inventory 扫描不完整。请重新审视扫描过程，确保所有包的 procedures/types/variables 均被捕获，而非仅修补 JSON 字段。",
   "analyze":

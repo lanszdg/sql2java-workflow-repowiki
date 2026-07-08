@@ -94,16 +94,16 @@ permission:
 
 ## Phase: inventory
 
-> inventory 阶段：先调 `scan` 扫描源码生成 `inventory-index.json` → 调用 `generateInventory`/`generateDependencyGraph` 转成下游产物 → 调用 `advance` 推进。仅在 advance 失败时做**最小修复**（见 Step 2）。
+> inventory 阶段：先调 `scan` 扫描源码生成**内存** InventoryIndex → 调用 `generateInventory`/`generateDependencyGraph` 转成下游产物 → 调用 `advance` 推进。仅在 advance 失败时做**最小修复**（见 Step 2）。
 
 ### 目标
 
-把 `inventory-index.json`（全字段）转换为下游消费的
+把 `scan` 扫描出的内存 InventoryIndex（全字段）转换为下游消费的
 `packages/{PKG_NAME}.json` + `subprograms/{PKG.METHOD}.json` + `tables/{TABLE}.json` + `inventory.json`。这一步由代码（`generateInventory` action）完成，你不读源码、不做 LLM 抽取。
 
 ### 输入
 
-- `inventory-index.json`：全字段索引——**由本阶段 Step 0 调 `scan` action 生成**（不再由 `start` 预生成）
+- 源码目录（run-context 记录的 `path` / `headerPath` / `bodyPath`）：由 `scan` action 确定性扫描，产出**内存** InventoryIndex 全字段索引。**不再落盘 `inventory-index.json`**——索引经引擎内存 cache 由 `scan` 交接给 `generateInventory`，避免读到全量包源码路径等无关上下文。
 
 ### 输出
 
@@ -113,17 +113,17 @@ permission:
 
 ### 工作步骤
 
-#### Step 0：扫描源码生成 inventory-index.json（首要）
+#### Step 0：扫描源码生成内存 InventoryIndex（首要）
 
-inventory-index.json 不再由 `start` 预生成，由本步调 `scan` action 产出（确定性扫描，零 LLM）：
+由本步调 `scan` action 产出内存索引（确定性扫描，零 LLM；索引不落盘）：
 
 ```
 workflow({ action: "scan", runId: "<runId>" })
 ```
 
 按返回文本（`✔` 开头=成功，`✖` 开头=失败）判断：
-- `✔ Scan Done` → `inventory-index.json` 已写入 artifacts 目录，继续 Step 1。
-- `✔ Scan Skipped`（已存在）→ 复用，继续 Step 1。
+- `✔ Scan Done` → 扫描完成，索引已在内存，继续 Step 1。
+- `✔ Scan Skipped`（内存已存在）→ 复用，继续 Step 1。
 - `✖ Empty Source` 或 `✖ Scan Error` → 源码不可处理，**不要继续 Step 1**。输出 `WORKER_SUMMARY`（Status: failed）+ `TASK_STATUS` `{"status":"failed","notes":"empty source / scan error"}` 结束，由编排者按失败重试机制处理。
 
 #### Step 1：代码生成 inventory + complexity/analysis-packages 兜底（核心）
@@ -144,7 +144,7 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 
 > 依赖图本身（callGraph / packageDependency / translationOrder / sccGroups / procedureOrder / functionOwnership）**不落盘**，由下游 `buildDependencyGraph` 从 `subprograms/*.json` directCalls 按需推导（inventory 阶段不产出 dependency-graph.json）。
 
-两者都读 `inventory-index.json`，互不依赖，顺序无关。**两个都成功**后输出 WORKER_SUMMARY 结束——编排者会调 advance 推进到 analyze。
+两者都消费 `scan` 产出的内存索引（`generateInventory` 在内存 cache 缺失时会自扫描兜底），互不依赖，顺序无关。**两个都成功**后输出 WORKER_SUMMARY 结束——编排者会调 advance 推进到 analyze。
 - 任一失败（`... Generation Failed`）→ 可重试该 action 一次；仍失败则回退到下方"fallback：手工生成"。
 
 #### Step 2：被重新 dispatch 时（advance 校验失败修复）
@@ -160,12 +160,12 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 
 ### fallback：手工生成（仅当 generateInventory 反复失败）
 
-`generateInventory` 反复失败（prescan index 本身异常）时，才读 `inventory-index.json` 的包名 + 源码，按运行时注入的 PackageArtifactSchema / SubprogramArtifactSchema / InventorySchema 字段要求手工写 `packages/{PKG}.json` + `subprograms/{PKG.METHOD}.json` + `inventory.json`。此为最后手段，正常路径不应走到。
+`generateInventory` 反复失败（扫描产出的索引本身异常）时，才读 `packages/{PKG}.json` 的包名 + 源码，按运行时注入的 PackageArtifactSchema / SubprogramArtifactSchema / InventorySchema 字段要求手工写 `packages/{PKG}.json` + `subprograms/{PKG.METHOD}.json` + `inventory.json`。此为最后手段，正常路径不应走到。
 
 ### ⛔ 关键约束（代码路径下多数自动满足）
 
 - `packages/{PKG}.json` 的 `packageName` 与文件名一致（大小写不敏感）
-- `inventory.json` 的 `packageNames` 覆盖 inventory-index 中所有包
+- `inventory.json` 的 `packageNames` 覆盖 scan 扫出的所有包
 - header-only 包（无 procedures/functions）也写入，`procedures: []`、`functions: []`、`bodyPath: null`
 - direction 只用 `"IN"` / `"OUT"` / `"IN OUT"`
 - 表的 columns 标注 `isPrimaryKey` 和 `nullable`
@@ -173,14 +173,14 @@ workflow({ action: "generateDependencyGraph", runId: "<runId>" })
 ### 增量恢复
 
 如果 inventory 阶段被中断后恢复（retry）：
-- 先试 `generateInventory`（幂等，覆盖写盘）；成功后 advance。
+- 先试 `generateInventory`（幂等，覆盖写盘；内存 cache 丢失时自扫描兜底）；成功后 advance。
 - 若 advance 仍因旧残留文件失败，按 Step 2 最小修复。
 
 ### 质量检查
 
-- [ ] `packages/` 下文件数 = inventory-index 包数
+- [ ] `packages/` 下文件数 = `scan` 返回的包数
 - [ ] 每个 per-package 文件 packageName 与文件名一致
-- [ ] `inventory.json` 的 packageNames 覆盖 inventory-index 所有包
+- [ ] `inventory.json` 的 packageNames 覆盖 scan 扫出的所有包
 - [ ] header-only 包也写入
 
 ---

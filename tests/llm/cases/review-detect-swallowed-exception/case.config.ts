@@ -18,7 +18,7 @@ import { writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type { CaseConfig } from "../../harness"
 import { assertCheckFound, assertArtifactExists } from "../../harness"
-import { makeInventoryIndex, makePlan, makePackageArtifact, writeArtifactJson } from "../../../ts/helpers/artifact-factory"
+import { makePlan, makePackageArtifact, writeArtifactJson } from "../../../ts/helpers/artifact-factory"
 
 const PACKAGE = "BAD_PKG"
 const PROJECT_ROOT_REL = "generated/bad-service"
@@ -31,13 +31,6 @@ const config: CaseConfig = {
 
   // ── mock 桩：上游 artifact（按 .opencode Schema 形状构造；writeArtifactJson 走跨平台原子写 + 自动建子目录） ──
   prepareArtifacts: dir => {
-    // inventory-index（reviewer 全量审查范围的来源）
-    writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
-      packages: [
-        { name: PACKAGE, headerFile: "pkg/bad.pks", bodyFile: "pkg/bad.pkb", procedures: [{ name: "DO_SOMETHING", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
-      ],
-    }))
-
     // inventory（Schema 要求 packageNames）
     writeArtifactJson(dir, "inventory.json", {
       sourcePath: "pkg", packageNames: [PACKAGE], tables: [], standaloneProcedures: [], triggers: [], views: [], sequences: [],

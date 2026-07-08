@@ -52,8 +52,7 @@ beforeAll(async () => {
   artifactsDir = join(dir, "run1")
   mkdirSync(artifactsDir, { recursive: true })
   const index = await scanSource(srcDir)
-  writeFileSync(join(artifactsDir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  buildInventoryFromIndex(artifactsDir)
+  buildInventoryFromIndex(artifactsDir, index)
 }, 60000)
 
 afterAll(() => {

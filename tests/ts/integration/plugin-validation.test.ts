@@ -31,7 +31,7 @@ describe("plugin-validation", () => {
   })
 
   describe("validateInventoryPackages", () => {
-    // 创建 inventory-index.json + 对应的 .pks/.pkb 文件，预期校验通过
+    // 创建 packages/*.json + 对应的 .pks/.pkb 文件，预期校验通过（inventory-index.json 已不再落盘）
     it.todo("inventory 包文件完整")
     it.todo("缺少 bodyFile → 报错")
     it.todo("headerFile 不存在 → 报错")

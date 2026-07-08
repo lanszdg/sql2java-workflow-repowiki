@@ -20,7 +20,7 @@ import { join } from "node:path"
 import type { CaseConfig } from "../../harness"
 import { assertGeneratedFileExists, assertJavaMatches } from "../../harness"
 import {
-  makeInventoryIndex, makeInventory,
+  makeInventory,
   makePlan, makeScaffold, makePackageArtifact, makeSubprogramArtifact, makeAnalysisPackage,
   makeTranslation, writeArtifactJson,
 } from "../../../ts/helpers/artifact-factory"
@@ -39,14 +39,6 @@ const config: CaseConfig = {
   sourcePath: SOURCE_DIR_REL,
 
   prepareArtifacts: dir => {
-    // inventory-index（两包，B 叶子在前）
-    writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
-      packages: [
-        { name: PKG_B, headerFile: "pkg/util.pks", bodyFile: `${SOURCE_DIR_REL}/UTIL_PKG.pkb`, procedures: [{ name: "get_by_id", type: "function", lineRange: [1, 10] }], estimatedLoc: 10 },
-        { name: PKG_A, headerFile: "pkg/order.pks", bodyFile: `${SOURCE_DIR_REL}/ORDER_PKG.pkb`, procedures: [{ name: "create_order", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
-      ],
-    }))
-
     writeArtifactJson(dir, "inventory.json", {
       sourcePath: SOURCE_DIR_REL, packageNames: [PKG_B, PKG_A], tables: [{ name: "T_ORDER", columns: [{ name: "CUST_ID", oracleType: "NUMBER", nullable: true, isPrimaryKey: false }] }], standaloneProcedures: [], triggers: [], views: [], sequences: [],
     })

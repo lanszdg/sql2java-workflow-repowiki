@@ -152,7 +152,7 @@ describe("prepareExecutionPoint（真实引擎推进，不调 opencode）", () =
         workDir,
         phase: "review",
         prepareArtifacts: dir => {
-          writeFileSync(join(dir, "inventory-index.json"), '{"packages":[{"name":"BAD_PKG"}]}')
+          writeFileSync(join(dir, "inventory.json"), '{"packageNames":["BAD_PKG"]}')
           writeFileSync(join(dir, "plan.json"), '{"x":1}')
           writeFileSync(join(dir, "scaffold.json"), '{"x":1}')
         },
@@ -161,7 +161,7 @@ describe("prepareExecutionPoint（真实引擎推进，不调 opencode）", () =
       const runJson = JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"))
       expect(runJson.currentPhase).toBe("review")
       expect(runJson.status).toBe("running")
-      expect(existsSync(join(runDir, "inventory-index.json"))).toBe(true)
+      expect(existsSync(join(runDir, "inventory.json"))).toBe(true)
     } finally {
       // mkdtempSync 在 tmpdir，由 OS 清理；显式不删避免额外依赖
     }
@@ -174,7 +174,7 @@ describe("prepareExecutionPoint（真实引擎推进，不调 opencode）", () =
       phase: "translate",
       sourcePath: "src-sql",
       prepareArtifacts: dir => {
-        writeFileSync(join(dir, "inventory-index.json"), '{"packages":[{"name":"EXC_PKG"}]}')
+        writeFileSync(join(dir, "inventory.json"), '{"packageNames":["EXC_PKG"]}')
       },
     })
     const runJson = JSON.parse(readFileSync(join(workDir, ".workflow-artifacts", RUN_ID, "run.json"), "utf-8"))

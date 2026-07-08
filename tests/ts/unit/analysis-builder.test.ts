@@ -31,8 +31,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "analysis-build-"))
   const index = await scanSource(FIXTURE_TINY)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  buildInventoryFromIndex(dir)
+  buildInventoryFromIndex(dir, index)
   buildDependencyGraphFromIndex(dir)
 }, 60000)
 
@@ -271,8 +270,7 @@ END pkg_a;
     writeFileSync(join(synthDir, "pkg_a.pkb"), pkgASpec, "utf-8")
     const index = await scanSource(synthDir)
     synthArtifacts = mkdtempSync(join(tmpdir(), "analysis-synth-art-"))
-    writeFileSync(join(synthArtifacts, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-    buildInventoryFromIndex(synthArtifacts)
+    buildInventoryFromIndex(synthArtifacts, index)
     return buildDependencyGraph(synthArtifacts)
   }
 

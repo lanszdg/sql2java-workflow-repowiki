@@ -32,8 +32,7 @@ beforeAll(async () => {
   const artifactsDir = join(dir, runId)
   mkdirSync(artifactsDir, { recursive: true })
   const index = await scanSource(FIXTURE_TINY)
-  writeFileSync(join(artifactsDir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  buildInventoryFromIndex(artifactsDir)
+  buildInventoryFromIndex(artifactsDir, index)
   buildDependencyGraphFromIndex(artifactsDir) // 产出 dependency-graph.json（含 procedureOrder）
 }, 60000)
 

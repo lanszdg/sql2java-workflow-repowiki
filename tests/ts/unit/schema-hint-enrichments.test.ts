@@ -165,7 +165,7 @@ describe("NON_ZOD_VALIDATION_RULES 覆盖性", () => {
 describe("COMMON_PITFALLS 一致性", () => {
   /** 所有有 Zod schema 的 phase（应有 pitfall 提示） */
   const ALL_SCHEMA_PHASES = [
-    "inventory-index", "inventory", "analyze", "plan", "scaffold",
+    "inventory", "analyze", "plan", "scaffold",
     "translate", "review", "verify", "dedup", "fix",
   ]
 

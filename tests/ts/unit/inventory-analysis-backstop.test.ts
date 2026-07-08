@@ -26,11 +26,10 @@ const ARTIFACTS_DIR = join(".workflow-artifacts", RUN_ID)
 
 beforeAll(async () => {
   mkdirSync(ARTIFACTS_DIR, { recursive: true })
-  // 1) prescan → inventory-index.json
+  // 1) prescan → 内存 InventoryIndex（不落盘）
   const index = await scanSource(FIXTURE_TINY)
-  writeFileSync(join(ARTIFACTS_DIR, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  // 2) 纯代码生成 packages/+subprograms/+tables/+inventory.json（不调 generateDependencyGraph —— 模拟 worker 漏调）
-  buildInventoryFromIndex(ARTIFACTS_DIR)
+  // 2) 纯代码生成 packages.+subprograms.+tables.+inventory.json（不调 generateDependencyGraph —— 模拟 worker 漏调）
+  buildInventoryFromIndex(ARTIFACTS_DIR, index)
 }, 60000)
 
 afterAll(() => {

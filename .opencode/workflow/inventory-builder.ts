@@ -1,5 +1,5 @@
 /**
- * Inventory Builder — 把 scan 阶段产出的 inventory-index.json（新形状：packages/subprograms 独立数组）
+ * Inventory Builder — 把 scan 阶段产出的 InventoryIndex（内存对象，新形状：packages/subprograms 独立数组）
  * 落盘为按实体独立的新产物：
  *   packages/{PKG}.json       — 包容器（名字索引 + 包级声明）
  *   subprograms/{PKG.METHOD}.json — 原子子程序（header/body 双定位 + directCalls）
@@ -9,10 +9,11 @@
  * 纯代码步骤（零 LLM）：scan（AST listener）已抽出全部结构字段，此处仅做格式映射 + Zod 校验。
  * 任一产物 Zod 校验失败即抛错（调用方据此判定 inventory 生成失败）。
  *
- * 注：inventory-index.json 仍作为 scan→generateInventory 的中间文件（Phase 4 评估是否消除）。
+ * 注：scan→generateInventory 的 InventoryIndex 经引擎层内存 cache 交接，不再落盘 inventory-index.json
+ *（避免大模型读到全量包源码路径等无关上下文）。本函数直接接收内存 index 对象。
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   InventorySchema,
@@ -34,24 +35,21 @@ function subprogramFileName(s: SubprogramInfo): string {
 }
 
 /**
- * 读取 inventory-index.json（新形状），写出 packages/+subprograms/+tables/+inventory.json。
+ * 把内存 InventoryIndex 写出为 packages/+subprograms/+tables/+inventory.json。
  * 任一产物 Zod 校验失败即抛错。
+ *
+ * idx 由调用方（generateInventory action）从引擎内存 cache 提供；cache miss 时由调用方自扫描兜底。
  */
-export function buildInventoryFromIndex(artifactsDir: string): {
+export function buildInventoryFromIndex(artifactsDir: string, idx: InventoryIndex): {
   packageCount: number
   subprogramCount: number
   tableCount: number
   warnings: string[]
 } {
-  const indexPath = join(artifactsDir, "inventory-index.json")
-  if (!existsSync(indexPath)) {
-    throw new Error(`inventory-index.json 不存在: ${indexPath}（scan 可能未运行）`)
-  }
   // 本函数重写 subprograms/*.json（含 directCalls），依赖图缓存（按 artifactsDir 常驻）随之失效——
   // 否则同 session 内 agent 重跑 generateInventory 修正 directCalls 后，buildDependencyGraph 仍返回旧图，
   // ensureRunScope 用过期闭包持久化错误 scope。生成失败也清：subprograms 可能已部分重写。
   clearDependencyGraphCache(artifactsDir)
-  const idx = JSON.parse(readFileSync(indexPath, "utf-8")) as InventoryIndex
 
   const packagesDir = join(artifactsDir, "packages")
   const subprogramsDir = join(artifactsDir, "subprograms")

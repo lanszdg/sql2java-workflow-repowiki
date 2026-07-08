@@ -124,7 +124,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
 // 共享 artifact 路径常量，避免跨阶段重复声明时遗漏
 // inventory 按实体落盘：packages/{PKG}.json + subprograms/{PKG.METHOD}.json + tables/{TABLE}.json
 // + 顶层 inventory.json（轻量索引）。调用图由 dependency-graph.ts 按需从 subprograms.directCalls
-// 推导，不再落盘 dependency-graph.json。inventory-index.json 仅为 scan→generateInventory 中间文件。
+// 推导，不再落盘 dependency-graph.json。inventory-index.json 已不再落盘（scan→generateInventory 经内存 cache 交接）。
 const _INV_BASE = ["inventory.json", "packages/*.json", "subprograms/*.json", "tables/*.json"] as const
 const _ANALYSIS = ["analysis-packages/*.json"] as const
 const _PLAN = ["plan.json"] as const
@@ -135,8 +135,8 @@ const _FSD = ["fsd/*/*.md"] as const
 
 /** 每个 phase 需要读取的上游 artifact 路径模板 */
 export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
-  // inventory-index.json 现由 inventory worker 第 0 步调 workflow({action:"scan"}) 自产，
-  // 不再是 start 预生成的 upstream。generateInventory 从 artifactsDir 自行读取。
+  // inventory 无外部 upstream：scan action 扫描源码产出内存 InventoryIndex，generateInventory 据此落盘
+  // packages/+subprograms/+tables/+inventory.json。inventory-index.json 不再落盘。
   inventory: [],
   // analyze：本包子程序详情从 subprograms/{PKG}.*.json 取（已收窄到本分片）；
   // 表结构从 tables/{TABLE}.json + inventory.json.tableNames；调用图由 dependency-graph.ts 按需推导。

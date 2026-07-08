@@ -780,7 +780,8 @@ export class WorkflowEngine {
     // 依赖图按需从 subprograms/*.json 的 directCalls 推导（取代旧 dependency-graph.json，已删）
     const graph = buildDependencyGraph(artifactsDir)
 
-    // inventory-index ↔ inventory 一致性已在 inventory 阶段完成时独立校验，此处不重复
+    // inventory.json.packageNames ↔ packages/*.json 文件名一致性由 validateInventoryIndexConsistency
+    // 在 inventory 阶段完成时独立校验（此处不重复）。inventory-index.json 已不再落盘。
 
     // inventory 包名 ↔ 依赖图包名（双向，大小写不敏感）
     const invNames = this.extractPackageNames(inventory)

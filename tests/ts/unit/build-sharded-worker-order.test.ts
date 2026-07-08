@@ -42,8 +42,7 @@ describe("buildShardedWorkerOrder — analyze", () => {
     art = join(dir, runId)
     mkdirSync(art, { recursive: true })
     const index = await scanSource(FIXTURE_TINY)
-    writeFileSync(join(art, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-    buildInventoryFromIndex(art)
+    buildInventoryFromIndex(art, index)
     buildDependencyGraphFromIndex(art) // 产出 dependency-graph.json（含 procedureOrder/functionOwnership）
   }, 60000)
 
@@ -104,8 +103,7 @@ describe("buildShardedWorkerOrder — translate", () => {
     art = join(dir, runId)
     mkdirSync(art, { recursive: true })
     const index = await scanSource(FIXTURE_TINY)
-    writeFileSync(join(art, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-    buildInventoryFromIndex(art)
+    buildInventoryFromIndex(art, index)
     buildDependencyGraphFromIndex(art)
     // translate 在 plan 之后，需 plan.json（给 projectRoot）+ analysis-packages 聚合（analysis-slice）
     writeFileSync(join(art, "plan.json"), JSON.stringify({

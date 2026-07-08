@@ -25,6 +25,7 @@ import {
   PackageArtifactSchema, SubprogramArtifactSchema, TableArtifactSchema,
 } from "../workflow/artifact-schemas"
 import { scanSource, scanSourceLazy } from "../workflow/plsql-scanner"
+import type { InventoryIndex } from "../workflow/plsql-scanner"
 import { refNamesForPackage, pkgOf, refOf } from "../workflow/refname"
 import { parseInventoryPackage, parseAnalysisPackage, type InventoryPackageParsed } from "../workflow/package-parser"
 import { buildInventoryFromIndex } from "../workflow/inventory-builder"
@@ -135,6 +136,46 @@ function loadRunContext(runId: string): RunContext | null {
   } catch {
     return null
   }
+}
+
+// ── inventory scan 内存交接 cache ─────────────────────────────────────────────
+// scan action 产出的 InventoryIndex 存此（key=artifactsDir），generateInventory 取此，
+// 不再落盘 inventory-index.json——从根源避免大模型读到全量包源码路径等无关上下文。
+// 进程重启丢失 cache 时 generateInventory 自扫描兜底（scan 确定性、可重跑）。
+const inventoryIndexCache = new Map<string, InventoryIndex>()
+
+/**
+ * 解析 run 源码路径并跑确定性扫描，返回 InventoryIndex（不落盘）。
+ * 供 scan action 与 generateInventory（cache miss 自兜底）复用。返回 null 表示缺源码路径。
+ */
+async function scanIndexForRun(runId: string, args: Record<string, unknown>): Promise<InventoryIndex | null> {
+  // 路径恢复：优先 args，否则从 run-context（双目录读 headerPath/bodyPath，单目录读 path）
+  let srcPath = args.sourcePath as string | undefined
+  let headerPath = args.headerPath as string | undefined
+  let bodyPath = args.bodyPath as string | undefined
+  // mainEntry 从 run-context.params 取（start 时写入）；args 可覆盖。用于 scanSourceLazy 闭包扫描。
+  let mainEntry = (args.mainEntry as string | undefined) ?? undefined
+  const ctx = loadRunContext(runId)
+  // 逐字段从 run-context 补齐：三路径模式(sourcePath+headerPath+bodyPath)下三者独立恢复，
+  // 避免 worker 只传 header/body 时把 sourcePath（承载 type/schema 的父目录）漏掉。
+  if (ctx) {
+    if (!srcPath && ctx.params.path) srcPath = resolve(ctx.params.path)
+    if (!headerPath && ctx.params.headerPath) headerPath = resolve(ctx.params.headerPath)
+    if (!bodyPath && ctx.params.bodyPath) bodyPath = resolve(ctx.params.bodyPath)
+  }
+  if (!mainEntry) mainEntry = ctx?.params?.mainEntry
+  if (!srcPath && !headerPath && !bodyPath) return null
+  // 过程级 mainEntry → 仅解析入口闭包（scanSourceLazy 内部判定过程级，非过程级/无点自动回退全量）。
+  // lazy 失败（如入口包不在源码）回退全量，让 advance 期 ensureRunScope 兜底报「入口不可解析」。
+  if (mainEntry) {
+    try {
+      return await scanSourceLazy({ sourcePath: srcPath, headerPath, bodyPath, mainEntry })
+    } catch (e: any) {
+      getLogger().warn("[scan]", `scanSourceLazy 失败，回退全量 scanSource: ${e?.message ?? e}`)
+      return await scanSource({ sourcePath: srcPath, headerPath, bodyPath })
+    }
+  }
+  return await scanSource({ sourcePath: srcPath, headerPath, bodyPath })
 }
 
 /** 从 agentFile 路径提取 agent 短名 (e.g. "agent/sql-analyst.md" → "sql-analyst") */
@@ -2192,7 +2233,8 @@ function autoFixStructuralIssues(run: WorkflowRun): {
     }
   }
 
-  // 4. inventory 按实体落盘产物：packages/ + subprograms/ + tables/ + inventory.json + inventory-index.json
+  // 4. inventory 按实体落盘产物：packages/ + subprograms/ + tables/ + inventory.json
+  //    （inventory-index.json 已不再落盘——scan→generateInventory 经内存 cache 交接）
   if (phase === "inventory") {
     const stripDir = (sub: string, schema: any) => {
       const dir = join(artifactsDir, sub)
@@ -2209,16 +2251,11 @@ function autoFixStructuralIssues(run: WorkflowRun): {
     stripDir("packages", PackageArtifactSchema)
     stripDir("subprograms", SubprogramArtifactSchema)
     stripDir("tables", TableArtifactSchema)
-    // inventory.json + inventory-index.json（顶层）
+    // inventory.json（顶层）
     const invSchema = getSchemaForPhase("inventory")
     const invPath = join(artifactsDir, "inventory.json")
     if (existsSync(invPath) && stripNullsAndRewrite(invPath, invSchema ?? undefined)) {
       fixedFiles.push("inventory.json")
-    }
-    const idxSchema = getSchemaForPhase("inventory-index")
-    const idxPath = join(artifactsDir, "inventory-index.json")
-    if (existsSync(idxPath) && stripNullsAndRewrite(idxPath, idxSchema ?? undefined)) {
-      fixedFiles.push("inventory-index.json")
     }
   }
 
@@ -3350,7 +3387,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
             // 写入 run-context.json：输入参数 + 目录的稳固快照，resume 兜底事实源
             // scanSource 已移至 inventory worker（见 case "scan"），start 不再扫描——
-            // run 立即落盘可 resume，inventory-index.json 由 inventory worker 第 0 步产出。
+            // run 立即落盘可 resume；inventory worker 第 0 步调 scan 产出内存 InventoryIndex（不落盘）。
             writeRunContext({
               runId,
               originalInput: (args.originalInput as string) ?? "",
@@ -3642,81 +3679,50 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
           }
 
-          // ── scan — inventory worker 第 0 步：扫描源码生成 inventory-index.json（由 sql-analyst agent 调用）──
-          // scanSource 从 start 搬到此处的产物：worker 在 generateInventory 之前调本 action，
-          // 跑确定性扫描写出 inventory-index.json，下游 generateInventory/generateDependencyGraph 读它。
-          // 幂等：inventory-index.json 已存在则跳过（resume 重入复用）；空源不写文件以便重试。
+          // ── scan — inventory worker 第 0 步：扫描源码生成 InventoryIndex（内存，不落盘）──
+          // worker 在 generateInventory 之前调本 action，跑确定性扫描把 InventoryIndex 存入内存 cache，
+          // 下游 generateInventory 从 cache 取（不读盘）。幂等：同 session cache 命中则跳过；空源不入 cache 以便重试。
           // 不在 ORCHESTRATOR_ONLY_ACTIONS 内 → worker 可调；sourcePath 缺省时从 run-context 恢复。
           case "scan": {
             if (!args.runId) throw new Error("runId required")
             const runId = args.runId
             const artifactsDir = join(ARTIFACT_DIR, runId)
-            const indexPath = join(artifactsDir, "inventory-index.json")
 
-            // 幂等：resume 重入时复用已扫结果（仿 review 预扫描"已存在则复用"语义）
-            if (existsSync(indexPath)) {
+            // 幂等：同 session 内已扫描则复用内存 index（不落盘，resume 重入同进程亦复用）
+            if (inventoryIndexCache.has(artifactsDir)) {
+              const cached = inventoryIndexCache.get(artifactsDir)!
               return {
                 title: "Scan Skipped",
-                output: `✔ Scan Skipped | inventory-index.json 已存在，复用: ${indexPath}`,
+                output: `✔ Scan Skipped | inventory index 已在内存（复用）| ${cached.packages.length} pkgs | ${cached.tables.length} tables`,
                 metadata: { runId, skipped: true },
               }
             }
 
-            // 路径恢复：优先 args，否则从 run-context（双目录读 headerPath/bodyPath，单目录读 path）
-            let srcPath = args.sourcePath as string | undefined
-            let headerPath = args.headerPath as string | undefined
-            let bodyPath = args.bodyPath as string | undefined
-            // mainEntry 从 run-context 取（start 时写入）；args 可覆盖。用于 scanSourceLazy 闭包扫描。
-            let mainEntry = (args.mainEntry as string | undefined) ?? undefined
-            const ctx = loadRunContext(runId)
-            // 逐字段从 run-context 补齐：三路径模式(sourcePath+headerPath+bodyPath)下三者独立恢复，
-            // 避免 worker 只传 header/body 时把 sourcePath（承载 type/schema 的父目录）漏掉。
-            if (ctx) {
-              if (!srcPath && ctx.params.path) srcPath = resolve(ctx.params.path)
-              if (!headerPath && ctx.params.headerPath) headerPath = resolve(ctx.params.headerPath)
-              if (!bodyPath && ctx.params.bodyPath) bodyPath = resolve(ctx.params.bodyPath)
-            }
-            if (!mainEntry) mainEntry = ctx?.mainEntry
-            if (!srcPath && !headerPath && !bodyPath) {
-              return {
-                title: "Scan Error",
-                output: "✖ Scan Error | 缺少源码路径（run metadata 未记录）",
-                metadata: { runId, error: "no_source_path" },
-              }
-            }
-
             try {
-              // 过程级 mainEntry → 仅解析入口闭包（scanSourceLazy 内部判定过程级，
-              // 非过程级/无点自动回退全量 scanSource）。lazy 失败（如入口包不在源码）回退全量，
-              // 让 advance 期 ensureRunScope 兜底报「入口不可解析」。
-              let index
-              if (mainEntry) {
-                try {
-                  index = await scanSourceLazy({ sourcePath: srcPath, headerPath, bodyPath, mainEntry })
-                } catch (e: any) {
-                  getLogger().warn("[scan]", `scanSourceLazy 失败，回退全量 scanSource: ${e?.message ?? e}`)
-                  index = await scanSource({ sourcePath: srcPath, headerPath, bodyPath })
+              const index = await scanIndexForRun(runId, args)
+              if (!index) {
+                return {
+                  title: "Scan Error",
+                  output: "✖ Scan Error | 缺少源码路径（run metadata 未记录）",
+                  metadata: { runId, error: "no_source_path" },
                 }
-              } else {
-                index = await scanSource({ sourcePath: srcPath, headerPath, bodyPath })
               }
               const total = index.packages.length + index.tables.length
                 + index.triggers.length + index.standaloneProcedures.length
                 + index.views.length + index.sequences.length
               if (total === 0) {
-                // 空源不写 index → 重试可重扫（幂等）
+                // 空源不入 cache → 重试可重扫（幂等）
                 return {
                   title: "Empty Source",
-                  output: `✖ Empty Source | 源码目录 "${srcPath}" 未找到任何可处理的 PL/SQL 对象（package、table、trigger、standalone procedure）。请确认目录下包含 .sql/.pks/.pkb/.pls 文件。`,
+                  output: `✖ Empty Source | 源码未找到任何可处理的 PL/SQL 对象（package、table、trigger、standalone procedure）。请确认目录下包含 .sql/.pks/.pkb/.pls 文件。`,
                   metadata: { runId, error: "empty_source" },
                 }
               }
-              if (!existsSync(artifactsDir)) mkdirSync(artifactsDir, { recursive: true })
-              writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8")
+              inventoryIndexCache.set(artifactsDir, index)
               return {
                 title: "Scan Done",
-                output: `✔ Scan Done | ${index.scannerUsed} | ${index.packages.length} pkgs | ${index.tables.length} tables | ${index.triggers.length} triggers | ${index.views.length} views | ${index.sequences.length} seqs\ninventory-index.json → ${indexPath}`,
-                metadata: { runId, scannerUsed: index.scannerUsed, indexPath },
+                output: `✔ Scan Done | ${index.scannerUsed} | ${index.packages.length} pkgs | ${index.tables.length} tables | ${index.triggers.length} triggers | ${index.views.length} views | ${index.sequences.length} seqs`,
+                metadata: { runId, scannerUsed: index.scannerUsed },
               }
             } catch (e: any) {
               return {
@@ -3728,8 +3734,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
 
           // ── generateInventory — inventory 阶段代码生成（由 sql-analyst agent 调用）──
-          // inventory 的结构抽取已下沉到 prescan（AST listener 全字段），此处纯代码把
-          // inventory-index.json 转成下游 packages/*.json + subprograms/*.json + tables/*.json + inventory.json。
+          // inventory 的结构抽取已下沉到 prescan（AST listener 全字段），此处纯代码把内存 InventoryIndex
+          // 转成下游 packages/*.json + subprograms/*.json + tables/*.json + inventory.json。
           // agent 调本 action 生成产物 → 输出 WORKER_SUMMARY + TASK_STATUS；编排者调 advance 推进。
           // advance 若被拒（校验失败），编排者重新 dispatch，workOrder 带校验错误，
           // agent 据此最小修复 json（优先）或重跑 generateInventory。
@@ -3738,7 +3744,18 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const runId = args.runId
             const artifactsDir = join(ARTIFACT_DIR, runId)
             try {
-              const r = buildInventoryFromIndex(artifactsDir)
+              // 内存交接：优先用 scan 写入的 cache；cache miss（跨进程 resume / 重试未先 scan）则自扫描兜底。
+              const cached = inventoryIndexCache.get(artifactsDir)
+              const idx = cached ?? await scanIndexForRun(runId, args)
+              if (!idx) {
+                return {
+                  title: "Inventory Generation Failed",
+                  output: `✖ inventory 代码生成失败：缺少源码路径且无内存 index（scan 可能未运行）。可先调 workflow({action:"scan", runId:"${runId}"})，再重试 generateInventory。`,
+                  metadata: { runId, error: "no_index" },
+                }
+              }
+              if (!cached) inventoryIndexCache.set(artifactsDir, idx)
+              const r = buildInventoryFromIndex(artifactsDir, idx)
               const warn = r.warnings.length > 0
                 ? `\n\n⚠️ prescan 降级导致部分元数据用默认值填充（${r.warnings.length} 条）：\n${r.warnings.map(w => `  - ${w}`).join("\n")}`
                 : ""

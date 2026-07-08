@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
@@ -29,14 +29,13 @@ beforeAll(async () => {
   ;(engine as any).artifactsRoot = dir
   engine.registerDefinition(SQL2JAVA_WORKFLOW)
 
-  // 1) prescan → 写 inventory-index.json
+  // 1) prescan → 内存 InventoryIndex（不落盘）
   const artifactsDir = join(dir, runId)
   mkdirSync(artifactsDir, { recursive: true })
   const index = await scanSource(FIXTURE_TINY)
-  writeFileSync(join(artifactsDir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
 
   // 2) 纯代码生成 inventory-packages + inventory.json
-  buildInventoryFromIndex(artifactsDir)
+  buildInventoryFromIndex(artifactsDir, index)
 }, 60000)
 
 afterAll(() => { try { /* OS 清理 tmpdir */ } catch {} })

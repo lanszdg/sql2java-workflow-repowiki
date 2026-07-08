@@ -1,17 +1,19 @@
 /**
  * inventory-builder.test.ts — 验证 prescan index → 下游 inventory artifacts 的纯代码转换
  *
- * inventory 阶段零 LLM 的核心：scanSource 产出 inventory-index.json（全字段）后，
+ * inventory 阶段零 LLM 的核心：scanSource 产出内存 InventoryIndex（全字段）后，
  * buildInventoryFromIndex 生成 packages/{PKG}.json + subprograms/{PKG.METHOD}.json +
  * tables/{TABLE}.json + inventory.json，产物须通过对应 Zod schema 校验，且下游可消费。
+ * 注：InventoryIndex 经内存对象传入（不再落盘 inventory-index.json）。
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs"
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { scanSource } from "@workflow/plsql-scanner"
 import { buildInventoryFromIndex } from "@workflow/inventory-builder"
+import type { InventoryIndex } from "@workflow/plsql-scanner"
 import {
   PackageArtifactSchema, SubprogramArtifactSchema, TableArtifactSchema, InventorySchema,
 } from "@workflow/artifact-schemas"
@@ -19,13 +21,13 @@ import { resolve } from "node:path"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
 let dir: string
+let index: InventoryIndex
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "inv-builder-"))
-  // 复刻 start 的前半段：prescan → 写 inventory-index.json
-  const index = await scanSource(FIXTURE_TINY)
+  // 复刻 scan action：prescan → 内存 InventoryIndex（不落盘）
+  index = await scanSource(FIXTURE_TINY)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
 }, 60000)
 
 afterAll(() => {
@@ -34,7 +36,7 @@ afterAll(() => {
 
 describe("buildInventoryFromIndex", () => {
   it("生成 packages/ + subprograms/ + tables/ + inventory.json", () => {
-    const r = buildInventoryFromIndex(dir)
+    const r = buildInventoryFromIndex(dir, index)
     expect(r.packageCount).toBe(3)
     expect(r.tableCount).toBe(6)
     const pkgFiles = readdirSync(join(dir, "packages")).filter(f => f.endsWith(".json"))
@@ -149,22 +151,19 @@ describe("buildInventoryFromIndex 失效依赖图缓存", () => {
   // subprograms/*.json 后不清缓存 → 同 session 重跑 generateInventory 修正 directCalls 后仍返回旧图。
   it("重写 subprograms 后 buildDependencyGraph 反映新 directCalls（缓存被清，非旧图）", async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "inv-cache-"))
-    const index = await scanSource(FIXTURE_TINY)
-    writeFileSync(join(cacheDir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
+    const idx = await scanSource(FIXTURE_TINY)
 
     // 1) 首次构建：GET_ITEM_OBJ→GET_ITEM 边存在
-    buildInventoryFromIndex(cacheDir)
+    buildInventoryFromIndex(cacheDir, idx)
     const { buildDependencyGraph } = await import("@workflow/dependency-graph")
     const g1 = buildDependencyGraph(cacheDir)
     expect(g1.callGraph["CORE_PKG.GET_ITEM_OBJ"] ?? []).toContain("CORE_PKG.GET_ITEM")
 
-    // 2) 改 inventory-index.json：抹掉 GET_ITEM_OBJ 的 directCalls，重写 subprograms
-    const idx2 = JSON.parse(readFileSync(join(cacheDir, "inventory-index.json"), "utf-8"))
-    for (const s of idx2.subprograms ?? []) {
+    // 2) 改内存 index：抹掉 GET_ITEM_OBJ 的 directCalls，重写 subprograms
+    for (const s of idx.subprograms ?? []) {
       if (s.name === "GET_ITEM_OBJ") s.directCalls = []
     }
-    writeFileSync(join(cacheDir, "inventory-index.json"), JSON.stringify(idx2, null, 2), "utf-8")
-    buildInventoryFromIndex(cacheDir)  // 应清缓存
+    buildInventoryFromIndex(cacheDir, idx)  // 应清缓存
 
     // 3) 再构建：若缓存已清，GET_ITEM_OBJ→GET_ITEM 边消失；若未清（旧图），边仍存在
     const g2 = buildDependencyGraph(cacheDir)

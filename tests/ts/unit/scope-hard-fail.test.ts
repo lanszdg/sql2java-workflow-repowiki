@@ -23,8 +23,7 @@ const ARTIFACTS_DIR = join(".workflow-artifacts", RUN_ID)
 beforeAll(async () => {
   mkdirSync(ARTIFACTS_DIR, { recursive: true })
   const index = await scanSource(FIXTURE_TINY)
-  writeFileSync(join(ARTIFACTS_DIR, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  buildInventoryFromIndex(ARTIFACTS_DIR)
+  buildInventoryFromIndex(ARTIFACTS_DIR, index)
   buildDependencyGraphFromIndex(ARTIFACTS_DIR) // inventory advance 校验前 complexity/兜底须就绪
 }, 60000)
 

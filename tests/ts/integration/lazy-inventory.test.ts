@@ -142,8 +142,7 @@ describe("scanSourceLazy 入口闭包惰性扫描", () => {
 
   it("下游链路在部分 inventory 上一致：buildInventoryFromIndex + buildDependencyGraph + computeClosure", async () => {
     const lazy = await scanSourceLazy({ sourcePath: srcDir, mainEntry: "CORE_PKG.ENTRY_PROC" })
-    writeFileSync(join(artifactsDir, "inventory-index.json"), JSON.stringify(lazy, null, 2), "utf-8")
-    buildInventoryFromIndex(artifactsDir)
+    buildInventoryFromIndex(artifactsDir, lazy)
 
     const g = buildDependencyGraph(artifactsDir)
     // 闭包内包都在依赖图里
@@ -175,7 +174,7 @@ describe("scanSourceLazy 入口闭包惰性扫描", () => {
 
   it("lazy 产物的 inventory.json 经 buildInventoryFromIndex 落盘包名 = 闭包子集", async () => {
     const lazy = await scanSourceLazy({ sourcePath: srcDir, mainEntry: "CORE_PKG.ENTRY_PROC" })
-    writeFileSync(join(artifactsDir, "inventory-index-lazy.json"), JSON.stringify(lazy, null, 2), "utf-8")
+    buildInventoryFromIndex(artifactsDir, lazy)
     // inventory.json.packageNames 应只含闭包内包
     const inv = JSON.parse(readFileSync(join(artifactsDir, "inventory.json"), "utf-8")) as { packageNames: string[] }
     const names = new Set(inv.packageNames.map(n => n.toUpperCase()))
@@ -310,8 +309,7 @@ describe("scanSourceLazy 断传递（方案 C）", () => {
 
   it("const-ref 同时被 directCall → 升级为 call-closure（其 directCalls 被跟随，不卡在 const-leaf）", async () => {
     const lazy = await scanSourceLazy({ sourcePath: srcDir2, mainEntry: "CALLER_PKG.ENTRY_PROC" })
-    writeFileSync(join(artDir2, "inventory-index.json"), JSON.stringify(lazy, null, 2), "utf-8")
-    buildInventoryFromIndex(artDir2)
+    buildInventoryFromIndex(artDir2, lazy)
     const g = buildDependencyGraph(artDir2)
     const cl = scopeClosure({
       callGraph: g.callGraph,
@@ -417,8 +415,7 @@ describe("scanSourceLazy 跨波次升级（const-leaf → call-closure）", () =
     expect(names.has("DEEP2_PKG"), "升级包的 directCalls 被 fixpoint 补收 → DEEP2 扫描").toBe(true)
 
     // scope 链路：MIDC_PKG 升级为 call-closure → MIDC_PKG.USE 进 scopeUnits；DEEP2_PKG.DO_DEEP 传递可达
-    writeFileSync(join(artDir3, "inventory-index.json"), JSON.stringify(lazy, null, 2), "utf-8")
-    buildInventoryFromIndex(artDir3)
+    buildInventoryFromIndex(artDir3, lazy)
     const g = buildDependencyGraph(artDir3)
     const cl = scopeClosure({
       callGraph: g.callGraph,

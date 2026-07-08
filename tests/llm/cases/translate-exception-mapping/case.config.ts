@@ -20,7 +20,7 @@ import { writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type { CaseConfig } from "../../harness"
 import { assertGeneratedFileExists, assertJavaMatches, assertDecision } from "../../harness"
-import { makeInventoryIndex, makePlan, makePackageArtifact, writeArtifactJson } from "../../../ts/helpers/artifact-factory"
+import { makePlan, makePackageArtifact, writeArtifactJson } from "../../../ts/helpers/artifact-factory"
 
 const PACKAGE = "EXC_PKG"
 const SOURCE_DIR_REL = "src-sql"
@@ -34,12 +34,6 @@ const config: CaseConfig = {
 
   // ── mock 桩：translate 前置 artifact（writeArtifactJson 走跨平台原子写 + 自动建子目录） ──
   prepareArtifacts: dir => {
-    writeArtifactJson(dir, "inventory-index.json", makeInventoryIndex({
-      packages: [
-        { name: PACKAGE, headerFile: "pkg/exc.pks", bodyFile: `${SOURCE_DIR_REL}/EXC_PKG.pkb`, procedures: [{ name: "SAVE_MSG", type: "procedure", lineRange: [1, 20] }], estimatedLoc: 20 },
-      ],
-    }))
-
     writeArtifactJson(dir, "inventory.json", {
       sourcePath: SOURCE_DIR_REL, packageNames: [PACKAGE], tables: [{ name: "T_APP_LOG", columns: [{ name: "MESSAGE", oracleType: "VARCHAR2", nullable: true, isPrimaryKey: false }] }], standaloneProcedures: [], triggers: [], views: [], sequences: [],
     })

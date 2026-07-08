@@ -422,7 +422,7 @@ describe("getArtifactFilename", () => {
 })
 
 describe("getSchemaForPhase", () => {
-  const knownPhases = ["inventory", "inventory-index", "plan", "scaffold", "dedup", "review", "fix"]
+  const knownPhases = ["inventory", "plan", "scaffold", "dedup", "review", "fix"]
 
   it("已知阶段都返回非 null schema", () => {
     for (const phase of knownPhases) {

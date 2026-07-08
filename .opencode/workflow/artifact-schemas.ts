@@ -184,8 +184,8 @@ export const TableArtifactSchema = z.object({
 // ── InventoryIndexSchema（scanner 产出的预扫描索引，machine-generated）──────────
 // 新形状：packages[]（PackageArtifactSchema 全字段）+ 顶层 subprograms[]（SubprogramArtifactSchema）
 // + tables/triggers/views/sequences/standaloneProcedures。不再有 callGraph（依赖图按需推导）。
-// 旧 schema 声明 name/headerFile/bodyFile/procedures[对象] + callGraph，与实际产出脱节，
-// 致 stripNullsAndRewrite(idxPath, InventoryIndexSchema) 校验失败、null 修复被静默跳过。
+// 注：inventory-index.json 已不再落盘——InventoryIndex 经引擎内存 cache 由 scan 交接给 generateInventory。
+// 本 schema 保留用于类型化/校验内存 index 形状（测试覆盖），不再是磁盘 phase artifact。
 export const InventoryIndexSchema = z.object({
   sourcePath: z.string(),
   scannedAt: z.string(),
@@ -878,7 +878,6 @@ import type { ZodType } from "zod"
 /** 阶段名 → 磁盘文件名映射（phase 名与文件名不一致时使用） */
 const PHASE_FILENAME_MAP: Record<string, string> = {
   inventory: "inventory",
-  "inventory-index": "inventory-index",
   plan: "plan",
   scaffold: "scaffold",
   translate: "translation",  // phase="translate" → 文件名 translation.json
@@ -895,7 +894,6 @@ export function getArtifactFilename(phase: string): string {
 export function getSchemaForPhase(phase: string): ZodType | null {
   const schemaMap: Record<string, ZodType> = {
     inventory: InventorySchema,
-    "inventory-index": InventoryIndexSchema,
     plan: PlanSchema,
     scaffold: ScaffoldSchema,
     dedup: DedupSchema,

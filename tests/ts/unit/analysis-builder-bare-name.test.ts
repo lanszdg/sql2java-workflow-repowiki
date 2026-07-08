@@ -40,8 +40,7 @@ beforeAll(async () => {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, "bare_pkg_body.sql"), BODY, "utf-8")
   const index = await scanSource(dir)
-  writeFileSync(join(dir, "inventory-index.json"), JSON.stringify(index, null, 2), "utf-8")
-  buildInventoryFromIndex(dir)
+  buildInventoryFromIndex(dir, index)
   graph = buildDependencyGraph(dir)
 }, 30000)
 
