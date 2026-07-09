@@ -598,7 +598,7 @@ describe("Repowiki analyze provider", () => {
     }
   })
 
-  it("returns repair_provider when auto-prepare is enabled but Repowiki root is unavailable", () => {
+  it("returns repair_provider when auto-prepare cannot produce Repowiki facts", () => {
     const t = tempArtifacts()
     try {
       const sourcePath = join(t.dir, "source")
@@ -620,7 +620,7 @@ describe("Repowiki analyze provider", () => {
         nextAction: "repair_provider",
         status: "failed",
       })
-      expect(String(result.response?.metadata.error)).toContain("Repowiki runtime unavailable")
+      expect(String(result.response?.metadata.error)).toMatch(/Repowiki runtime unavailable|list-services failed/)
       expect(existsSync(join(t.dir, "fsd", "CORE_PKG", "get_item.md"))).toBe(false)
     } finally {
       t.cleanup()
@@ -692,7 +692,9 @@ describe("Repowiki analyze provider", () => {
         prepareRunner: (command) => {
           commands.push(command)
           if (command.name === "merge-knowledge") {
-            const knowledgeDir = join(sourcePath, ".repowiki", "knowledge")
+            const knowledgeDir = command.env?.REPOWIKI_WORK_DIR
+              ? join(command.env.REPOWIKI_WORK_DIR, "knowledge")
+              : join(sourcePath, ".repowiki", "knowledge")
             mkdirSync(knowledgeDir, { recursive: true })
             writeFileSync(join(knowledgeDir, "functions.json"), JSON.stringify({ functions: [l2Fact()] }, null, 2), "utf-8")
           }
@@ -722,6 +724,80 @@ describe("Repowiki analyze provider", () => {
     }
   })
 
+  it("keeps Repowiki L1/L2 working files inside the workflow run artifacts", () => {
+    const t = tempArtifacts()
+    try {
+      const sourcePath = join(t.dir, "source")
+      mkdirSync(sourcePath, { recursive: true })
+      const repowikiRoot = fakeRepowikiRoot(t.dir)
+      const workDir = join(t.dir, "repowiki-work")
+
+      const result = runRepowikiAnalyzeProviderForDispatch({
+        currentPhase: "analyze",
+        runId: "run-test",
+        artifactsDir: t.dir,
+        targetUnits: ["CORE_PKG.get_item"],
+        metadata: { repowikiAnalyzeProvider: true, repowikiAutoPrepare: true, repowikiRoot },
+        sourcePath,
+        repowikiRoot,
+        env: {},
+        prepareRunner: (command) => {
+          expect(command.env?.REPOWIKI_WORK_DIR).toBe(workDir)
+          if (command.name === "merge-knowledge") {
+            const knowledgeDir = join(workDir, "knowledge")
+            mkdirSync(knowledgeDir, { recursive: true })
+            writeFileSync(join(knowledgeDir, "functions.json"), JSON.stringify({ functions: [l2Fact()] }, null, 2), "utf-8")
+          }
+          return { status: 0 }
+        },
+        l3Runner: (command) => {
+          expect(command.env?.REPOWIKI_WORK_DIR).toBe(workDir)
+          if (command.name === "l3-dispatcher") {
+            writeFsdDoc(t.dir, "fsd/CORE_PKG/get_item.md", "# L3 FSD - CORE_PKG.get_item\n")
+          }
+          return { status: 0, stdout: `${command.name} ok` }
+        },
+        now: () => "2026-07-08T00:00:00.000Z",
+      })
+
+      expect(result.response?.metadata.status).toBe("completed")
+      expect(existsSync(join(workDir, "knowledge", "functions.json"))).toBe(true)
+      expect(existsSync(join(sourcePath, ".repowiki"))).toBe(false)
+
+      const prepareStatus = JSON.parse(readFileSync(join(t.dir, "status", "repowiki-prepare.json"), "utf-8"))
+      expect(prepareStatus.factsFile).toBe(join(workDir, "knowledge", "functions.json"))
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it("does not persist sensitive child process environment in Repowiki L3 status", () => {
+    const t = tempArtifacts()
+    try {
+      const l3 = l3Harness(t.dir)
+      const secret = "sk-test-secret-value"
+
+      const result = runRepowikiAnalyzeProvider({
+        enabled: true,
+        artifactsDir: t.dir,
+        sourcePath: l3.sourcePath,
+        targetUnits: ["CORE_PKG.get_item"],
+        l2Facts: [l2Fact()],
+        repowikiRoot: l3.repowikiRoot,
+        env: { OPENAI_API_KEY: secret },
+        l3Runner: l3.l3Runner,
+        now: () => "2026-07-08T00:00:00.000Z",
+      })
+
+      expect(result.status).toBe("completed")
+      const l3Status = readFileSync(join(t.dir, "status", "repowiki-l3.json"), "utf-8")
+      expect(l3Status).not.toContain("OPENAI_API_KEY")
+      expect(l3Status).not.toContain(secret)
+    } finally {
+      t.cleanup()
+    }
+  })
+
   it("auto-prepares once per run before L3 consumes Repowiki facts", () => {
     const t = tempArtifacts()
     try {
@@ -743,7 +819,9 @@ describe("Repowiki analyze provider", () => {
         prepareRunner: (command: RepowikiPrepareCommand) => {
           commands.push(command.name)
           if (command.name === "merge-knowledge") {
-            const knowledgeDir = join(sourcePath, ".repowiki", "knowledge")
+            const knowledgeDir = command.env?.REPOWIKI_WORK_DIR
+              ? join(command.env.REPOWIKI_WORK_DIR, "knowledge")
+              : join(sourcePath, ".repowiki", "knowledge")
             mkdirSync(knowledgeDir, { recursive: true })
             writeFileSync(join(knowledgeDir, "functions.json"), JSON.stringify({ functions: [l2Fact({ method: "GET_ITEM" })] }, null, 2), "utf-8")
           }

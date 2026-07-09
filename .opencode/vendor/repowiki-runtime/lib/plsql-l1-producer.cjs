@@ -13,6 +13,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require("./repowiki-workdir.cjs");
 
 // ---- vendor 路径解析 ----
 // vendor 目录：config/skills/repowiki/vendor/node_modules
@@ -1101,7 +1102,7 @@ function produce(repo) {
   };
 
   // 写入 .repowiki/plsql-l1.json
-  const repowikiDir = path.join(repo, ".repowiki");
+  const repowikiDir = repowikiWorkDir(repo);
   if (!fs.existsSync(repowikiDir)) fs.mkdirSync(repowikiDir, { recursive: true });
   const outPath = path.join(repowikiDir, "plsql-l1.json");
   fs.writeFileSync(outPath, JSON.stringify(output, null, 2), "utf8");

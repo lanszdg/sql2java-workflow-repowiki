@@ -15,12 +15,14 @@
 const fs = require("fs");
 const path = require("path");
 const cp = require("child_process");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 const { docFirstLine, firstDocBeforeDecl, methodDocMap } = require(path.join(__dirname, "lib", "javadoc.cjs"));
 const { buildProjectionParts } = require(path.join(__dirname, "lib", "l2-projection.cjs"));
 const { inventory: l1Inventory, edgesFor: l1EdgesFor } = require(path.join(__dirname, "lib", "l1-adapter.cjs"));
 const { openCodegraphSync, calleesForByNodeId, calleesForBySymbol } = require(path.join(__dirname, "lib", "l2-callees.cjs"));
 
 const repo = process.argv[2];
+const repowikiDir = repo ? repowikiWorkDir(repo) : "";
 const a3 = process.argv[3];   // 模块绝对路径 或 --all
 const a4 = process.argv[4];   // slug(单模块时)
 if (!repo || !a3) { console.error("usage: node repowiki-l2.cjs <仓根> <模块绝对路径> <slug>   |   <仓根> --all"); process.exit(2); }
@@ -1250,7 +1252,7 @@ const REPO_ARTIFACT_ID = rootPomArtifact();
 const REPO_NAME = gitRepoName();
 
 function moduleDirBySlug(slug) {
-  const file = path.join(repo, ".repowiki", "modules.json");
+  const file = path.join(repowikiDir, "modules.json");
   try {
     const mods = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
     const mod = Array.isArray(mods) ? mods.find((m) => m.slug === slug) : null;
@@ -3438,7 +3440,7 @@ function buildCoverageLedger(slug, profile, services, functions, entryCandidates
 }
 
 function writeParts(slug, services, functions, downstream, profile, models = [], entryCandidates = null, moduleDirArg = "", options = {}) {
-  const partsDir = path.join(repo, ".repowiki", "knowledge", "parts");
+  const partsDir = path.join(repowikiDir, "knowledge", "parts");
   fs.mkdirSync(partsDir, { recursive: true });
   const w = (kind, data) => fs.writeFileSync(path.join(partsDir, `${kind}.part-${slug}.json`), JSON.stringify(data, null, 2), "utf8");
   const uniq = (arr, keyf) => { const s = new Map(); for (const x of arr) s.set(keyf(x), x); return [...s.values()]; };
@@ -3563,7 +3565,7 @@ function shouldPrintL2Progress(seen, total, lastPrinted) {
 }
 
 if (a3 === "--all") {
-  const mf = path.join(repo, ".repowiki", "modules.json");
+  const mf = path.join(repowikiDir, "modules.json");
   if (!fs.existsSync(mf)) { console.error(`✗ 无 ${mf}，先跑 list-services.cjs`); process.exit(4); }
   const mods = JSON.parse(fs.readFileSync(mf, "utf8"));
   if (!Array.isArray(mods) || mods.length === 0) {
@@ -3571,7 +3573,7 @@ if (a3 === "--all") {
     console.error("停止 L2：当前 profile 未发现入口，不能把空模块清单当成正常完成。");
     process.exit(4);
   }
-  const partsDir = path.join(repo, ".repowiki", "knowledge", "parts");
+  const partsDir = path.join(repowikiDir, "knowledge", "parts");
   let done = 0, skip = 0, seen = 0;
   let lastProgressPrinted = 0;
   printL2Progress(0, mods.length, "", "start");
@@ -3600,7 +3602,7 @@ if (a3 === "--all") {
   }
   console.log(`[L2-script] complete processed=${done} skipped=${skip} modules=${mods.length}`);
   console.log(`NEXT: L2 抽取完成。禁止输出 text-only response 停下，必须立即运行合并：`);
-  console.log(`  node "${path.join(__dirname, "merge-knowledge.cjs")}" "${path.join(repo, ".repowiki", "knowledge")}"`);
+  console.log(`  node "${path.join(__dirname, "merge-knowledge.cjs")}" "${path.join(repowikiDir, "knowledge")}"`);
   if (CG) { try { CG.destroy(); } catch (_) {} CG = null; }
 } else {
   if (a3.startsWith("--")) usageAndExit(`invalid L2 usage: ${a3} cannot be used as a module path. Use --all before --profile.`);
@@ -3610,7 +3612,7 @@ if (a3 === "--all") {
   if (!fs.existsSync(resolvedModuleDir) || !fs.statSync(resolvedModuleDir).isDirectory()) {
     usageAndExit(`single-module mode requires an existing module directory: ${a3}`);
   }
-  const mf = path.join(repo, ".repowiki", "modules.json");
+  const mf = path.join(repowikiDir, "modules.json");
   if (fs.existsSync(mf)) {
     const mods = JSON.parse(fs.readFileSync(mf, "utf8").replace(/^\uFEFF/, ""));
     const mod = Array.isArray(mods) ? mods.find((x) => x.slug === a4) : null;

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 const rowsLib = require(path.join(__dirname, "lib", "rows.cjs"));
 const { writeXlsx } = require(path.join(__dirname, "lib", "xlsx.cjs"));
 const skillContract = require(path.join(__dirname, "lib", "l3-skill-contract.cjs"));
@@ -15,7 +16,7 @@ const { loadSourceFactRepairs, applySourceFactRepairsToFunction } = require(path
 const args = process.argv.slice(2);
 const command = args[0];
 const repo = path.resolve(args[1] || ".");
-const repowikiDir = path.join(repo, ".repowiki");
+const repowikiDir = repowikiWorkDir(repo);
 const schedulerDir = path.join(repowikiDir, "l3-scheduler");
 const tasksFile = path.join(schedulerDir, "tasks.json");
 const stateFile = path.join(schedulerDir, "state.json");

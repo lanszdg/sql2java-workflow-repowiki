@@ -295,6 +295,38 @@ function truncateTail(value: unknown, limit = 4000): string {
   return text.length <= limit ? text : text.slice(text.length - limit)
 }
 
+function repowikiWorkflowWorkDir(artifactsDir: string): string {
+  return join(resolve(artifactsDir), "repowiki-work")
+}
+
+function withRepowikiWorkflowEnv(
+  env: Record<string, string | undefined>,
+  artifactsDir: string,
+  sourcePath?: string,
+): Record<string, string | undefined> {
+  const next = {
+    ...env,
+    REPOWIKI_WORK_DIR: env.REPOWIKI_WORK_DIR || repowikiWorkflowWorkDir(artifactsDir),
+  }
+  if (sourcePath) next.REPOWIKI_SOURCE_ROOT = resolve(sourcePath)
+  return next
+}
+
+function repowikiWorkDir(sourcePath: string, env: Record<string, string | undefined>): string {
+  return resolve(env.REPOWIKI_WORK_DIR || join(resolve(sourcePath), ".repowiki"))
+}
+
+function publicStepRecord(step: RepowikiPrepareCommand, result: RepowikiPrepareCommandResult): RepowikiPrepareStepResult {
+  const { env: _env, ...publicStep } = step
+  return {
+    ...publicStep,
+    status: result.status,
+    stdout: truncateTail(result.stdout),
+    stderr: truncateTail(result.stderr),
+    error: result.error,
+  }
+}
+
 function defaultPrepareRunner(step: RepowikiPrepareCommand): RepowikiPrepareCommandResult {
   const result = spawnSync(step.command, step.args, {
     cwd: step.cwd,
@@ -472,11 +504,12 @@ function ensureRepowikiPreparedForRun(options: {
 
   const now = options.now || (() => new Date().toISOString())
   const startedAt = now()
+  const env = withRepowikiWorkflowEnv(options.env, options.artifactsDir, options.sourcePath)
   const result = runRepowikiL1L2Prepare({
     sourcePath: options.sourcePath,
     repowikiRoot: options.repowikiRoot,
     profile: options.profile,
-    env: options.env,
+    env,
     runner: options.runner,
   })
   writePrepareStatus({
@@ -522,9 +555,12 @@ function writeL3Status(options: {
 function l3ChildEnv(
   env: Record<string, string | undefined>,
   artifactsDir: string,
+  sourcePath: string,
 ): Record<string, string | undefined> {
   return {
     ...env,
+    REPOWIKI_WORK_DIR: env.REPOWIKI_WORK_DIR || repowikiWorkflowWorkDir(artifactsDir),
+    REPOWIKI_SOURCE_ROOT: env.REPOWIKI_SOURCE_ROOT || resolve(sourcePath),
     REPOWIKI_L3_DOCS_ROOT: artifactsDir,
     REPOWIKI_FSD_GATE_MODE: env.REPOWIKI_FSD_GATE_MODE || "soft",
     REPOWIKI_L3_SOFT_L2_COMPLETENESS: env.REPOWIKI_L3_SOFT_L2_COMPLETENESS || "1",
@@ -580,7 +616,7 @@ export function runRepowikiL3Generate(options: {
     }
     const nodePath = resolveRepowikiNodePath(root, env, options.nodePath)
     const runner = options.runner || defaultPrepareRunner
-    const childEnv = l3ChildEnv(env, artifactsDir)
+    const childEnv = l3ChildEnv(env, artifactsDir, sourcePath)
     const concurrency = Math.max(1, Math.floor(Number(options.concurrency || childEnv.REPOWIKI_L3_CONCURRENCY || 8)))
     const l3WorkerRunner = resolveL3WorkerRunner(childEnv)
     const l3DispatcherArgs = [scripts.l3Dispatcher, sourcePath]
@@ -604,14 +640,7 @@ export function runRepowikiL3Generate(options: {
 
     for (const step of plan) {
       const result = runner(step)
-      const record = {
-        ...step,
-        status: result.status,
-        stdout: truncateTail(result.stdout),
-        stderr: truncateTail(result.stderr),
-        error: result.error,
-      }
-      steps.push(record)
+      steps.push(publicStepRecord(step, result))
       if (result.error || result.status !== 0) {
         const detail = result.stderr || result.stdout || result.error || "no output"
         return {
@@ -711,7 +740,13 @@ export function runRepowikiL1L2Prepare(options: {
     const profile = options.profile || env.REPOWIKI_PROFILE || "oracle-sp"
     const scripts = repowikiRuntimeScripts(root)
     const nodePath = resolveRepowikiNodePath(root, env, options.nodePath)
-    const knowledgeDir = join(sourcePath, ".repowiki", "knowledge")
+    const workDir = repowikiWorkDir(sourcePath, env)
+    const childEnv = {
+      ...env,
+      REPOWIKI_WORK_DIR: workDir,
+      REPOWIKI_SOURCE_ROOT: env.REPOWIKI_SOURCE_ROOT || sourcePath,
+    }
+    const knowledgeDir = join(workDir, "knowledge")
     const factsFile = join(knowledgeDir, "functions.json")
     const forceRefresh = String(env.REPOWIKI_AUTO_PREPARE_FORCE ?? "1").trim().toLowerCase() !== "0"
       && String(env.REPOWIKI_AUTO_PREPARE_FORCE ?? "1").trim().toLowerCase() !== "false"
@@ -721,22 +756,15 @@ export function runRepowikiL1L2Prepare(options: {
     }
     const runner = options.runner || defaultPrepareRunner
     const plan: RepowikiPrepareCommand[] = [
-      { name: "plsql-l1", command: nodePath, args: [scripts.plsqlL1, sourcePath], cwd: sourcePath },
-      { name: "list-services", command: nodePath, args: [scripts.listServices, sourcePath, "--profile", profile], cwd: sourcePath },
-      { name: "repowiki-l2", command: nodePath, args: [scripts.l2, sourcePath, "--all", "--profile", profile], cwd: sourcePath },
-      { name: "merge-knowledge", command: nodePath, args: [scripts.mergeKnowledge, knowledgeDir], cwd: sourcePath },
+      { name: "plsql-l1", command: nodePath, args: [scripts.plsqlL1, sourcePath], cwd: sourcePath, env: childEnv },
+      { name: "list-services", command: nodePath, args: [scripts.listServices, sourcePath, "--profile", profile], cwd: sourcePath, env: childEnv },
+      { name: "repowiki-l2", command: nodePath, args: [scripts.l2, sourcePath, "--all", "--profile", profile], cwd: sourcePath, env: childEnv },
+      { name: "merge-knowledge", command: nodePath, args: [scripts.mergeKnowledge, knowledgeDir], cwd: sourcePath, env: childEnv },
     ]
 
     for (const step of plan) {
       const result = runner(step)
-      const record = {
-        ...step,
-        status: result.status,
-        stdout: truncateTail(result.stdout),
-        stderr: truncateTail(result.stderr),
-        error: result.error,
-      }
-      steps.push(record)
+      steps.push(publicStepRecord(step, result))
       if (result.error || result.status !== 0) {
         const detail = result.stderr || result.stdout || result.error || "no output"
         return {
@@ -771,6 +799,7 @@ export function resolveRepowikiL2FactsFile(options: {
     || String(options.metadata?.repowikiL2FactsFile || "").trim()
     || String(options.env?.REPOWIKI_L2_FACTS_FILE || "").trim()
   if (explicit) return resolve(explicit)
+  if (options.env?.REPOWIKI_WORK_DIR) return join(resolve(options.env.REPOWIKI_WORK_DIR), "knowledge", "functions.json")
   if (options.sourcePath) return join(resolve(options.sourcePath), ".repowiki", "knowledge", "functions.json")
   return undefined
 }
@@ -925,6 +954,7 @@ export function runRepowikiAnalyzeProviderForDispatch(
   options: RepowikiAnalyzeProviderDispatchOptions,
 ): RepowikiAnalyzeProviderDispatchResult {
   const env = options.env ?? process.env
+  let providerEnv = env
   if (options.currentPhase !== "analyze" || !isRepowikiAnalyzeProviderEnabled(options.metadata, env)) {
     return { handled: false }
   }
@@ -937,12 +967,13 @@ export function runRepowikiAnalyzeProviderForDispatch(
   let l2Facts = options.l2Facts
   let factsFile: string | undefined
   if (!l2Facts && isRepowikiAutoPrepareEnabled(options.metadata, env) && options.sourcePath) {
+    providerEnv = withRepowikiWorkflowEnv(env, options.artifactsDir, options.sourcePath)
     const prepare = ensureRepowikiPreparedForRun({
       artifactsDir: options.artifactsDir,
       sourcePath: options.sourcePath,
       repowikiRoot: options.repowikiRoot || String(options.metadata?.repowikiRoot || "").trim() || undefined,
       profile: repowikiProfile(options.metadata, env),
-      env,
+      env: providerEnv,
       runner: options.prepareRunner,
       now: options.now,
     })
@@ -964,7 +995,7 @@ export function runRepowikiAnalyzeProviderForDispatch(
   if (!l2Facts) {
     factsFile = factsFile || resolveRepowikiL2FactsFile({
       metadata: options.metadata,
-      env,
+      env: providerEnv,
       sourcePath: options.sourcePath,
       l2FactsFile: options.l2FactsFile,
     })
@@ -994,7 +1025,7 @@ export function runRepowikiAnalyzeProviderForDispatch(
     l3Runner: options.l3Runner,
     l3Concurrency: options.l3Concurrency,
     shardIndex: options.shardIndex,
-    env,
+    env: providerEnv,
     now: options.now,
   })
 

@@ -2,12 +2,13 @@
 const childProcess = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 
 const repo = path.resolve(process.argv[2] || ".");
 const phase = (process.argv[3] || "").toLowerCase();
 const verbose = process.argv.includes("--verbose");
 const lineOnly = process.argv.includes("--line");
-const repowikiDir = path.join(repo, ".repowiki");
+const repowikiDir = repowikiWorkDir(repo);
 const knowledgeDir = path.join(repowikiDir, "knowledge");
 const codegraphStateFile = path.join(repowikiDir, "codegraph-init.json");
 const modulesFile = path.join(repowikiDir, "modules.json");
@@ -298,7 +299,9 @@ function rowDraftOutput(row) {
   const task = row.task || {};
   if ((item.kind || task.kind) !== "function-doc") return "";
   const output = item.output || task.output || "";
-  return String(output || "").replace(/\\/g, "/").includes("/.repowiki/l3-drafts/") ? output : "";
+  const normalized = String(output || "").replace(/\\/g, "/");
+  const draftRoot = path.join(repowikiDir, "l3-drafts").replace(/\\/g, "/");
+  return normalized.startsWith(draftRoot + "/") ? output : "";
 }
 
 function depsDone(task, currentState) {

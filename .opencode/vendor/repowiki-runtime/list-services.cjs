@@ -7,6 +7,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 
 const args = process.argv.slice(2);
 let rootArg = ".";
@@ -287,7 +288,7 @@ const rows = attempts.flatMap((a) => a.rows)
   .sort((a, b) => `${a.profile}:${a.relPath}`.localeCompare(`${b.profile}:${b.relPath}`));
 
 // ★ 写权威清单文件 —— 编排器/进度脚本/子代理 一律从这里读 relPath/absPath/slug，绝不自行拼名拍平路径(根治路径错误)
-const repowikiDir = path.join(root, ".repowiki");
+const repowikiDir = repowikiWorkDir(root);
 fs.mkdirSync(repowikiDir, { recursive: true });
 if (rows.length === 0) {
   const diagnostics = {

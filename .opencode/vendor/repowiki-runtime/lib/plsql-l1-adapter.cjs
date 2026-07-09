@@ -8,9 +8,10 @@
 
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require("./repowiki-workdir.cjs");
 
 function plsqlInventory(repo, opts = {}) {
-  const l1Path = path.join(repo, ".repowiki", "plsql-l1.json");
+  const l1Path = path.join(repowikiWorkDir(repo), "plsql-l1.json");
   if (!fs.existsSync(l1Path)) {
     return {
       error: "missing plsql-l1.json",

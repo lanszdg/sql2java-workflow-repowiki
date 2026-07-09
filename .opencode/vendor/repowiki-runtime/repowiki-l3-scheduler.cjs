@@ -2,6 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 const skillContract = require(path.join(__dirname, "lib", "l3-skill-contract.cjs"));
 const l3Selection = require(path.join(__dirname, "lib", "l3-selection.cjs"));
 const rowsLib = require(path.join(__dirname, "lib", "rows.cjs"));
@@ -30,7 +31,7 @@ if (!args[0]) {
   process.exit(2);
 }
 
-const repowikiDir = path.join(repo, ".repowiki");
+const repowikiDir = repowikiWorkDir(repo);
 const knowledgeDir = path.join(repowikiDir, "knowledge");
 const schedulerDir = path.join(repowikiDir, "l3-scheduler");
 const modulesFile = path.join(repowikiDir, "modules.json");

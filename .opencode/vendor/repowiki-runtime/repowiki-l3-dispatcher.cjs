@@ -4,6 +4,7 @@
 const childProcess = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { repowikiWorkDir } = require(path.join(__dirname, "lib", "repowiki-workdir.cjs"));
 
 const skillDir = __dirname;
 const packageRoot = path.resolve(skillDir, "..", "..", "..");
@@ -154,7 +155,7 @@ function validateOpencodeConfig(modelOverride = "") {
 }
 
 function dispatcherLogDir(repo) {
-  return path.join(repo, ".repowiki", "logs", "l3-dispatcher");
+  return path.join(repowikiWorkDir(repo), "logs", "l3-dispatcher");
 }
 
 function dispatcherPromptDir(repo) {
@@ -328,7 +329,7 @@ function readProgress(repo) {
 
 function reflectedActiveCount(repo, active) {
   if (!active || active.size === 0) return 0;
-  const state = readJson(path.join(repo, ".repowiki", "l3-scheduler", "state.json"), { tasks: {} });
+  const state = readJson(path.join(repowikiWorkDir(repo), "l3-scheduler", "state.json"), { tasks: {} });
   const activeAgents = new Set(Array.from(active.values()).map((item) => item.agentName).filter(Boolean));
   let count = 0;
   for (const item of Object.values(state.tasks || {})) {

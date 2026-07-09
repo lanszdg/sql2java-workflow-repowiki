@@ -20,7 +20,7 @@ if (!kdir) { console.error('usage: node merge-knowledge.cjs "<...>/.repowiki/kno
 fs.mkdirSync(kdir, { recursive: true });
 const partsDir = path.join(kdir, "parts");
 const repowikiDir = path.dirname(kdir);
-const repoRoot = path.dirname(repowikiDir);
+const repoRoot = path.resolve(process.env.REPOWIKI_SOURCE_ROOT || path.dirname(repowikiDir));
 const modulesFile = path.join(repowikiDir, "modules.json");
 const codegraphStateFile = path.join(repowikiDir, "codegraph-init.json");
 const EXPECTED_SCHEMA_VERSION = 11;
