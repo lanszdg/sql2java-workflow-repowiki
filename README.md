@@ -1,5 +1,191 @@
 # sql2java-workflow
 
+## Repowiki Oracle 存过 FSD 接入版
+
+本仓库是在 `sql2java-workflow` 现有工作流上接入 Repowiki Oracle 存储过程 FSD 生成能力的版本。仓库只保存接入代码、命令约定、测试和文档；不提交 Lingxi runtime、模型配置、`.exe`、运行日志或 `.repowiki` 运行产物。
+
+当前边界：
+
+- 保留 `sql2java` 的 `inventory/scan`，继续用它生成 `targetUnits`、`shardPlan`、`packages/*.json`、`subprograms/*.json`，支撑后续 workflow 调度。
+- 在 `analyze` 阶段启用 Repowiki Provider，调用外部已有 Repowiki L1/L2/L3 runtime。
+- Repowiki L1/L2 每个 workflow run 准备一次，生成 `{sourcePath}/.repowiki/knowledge/functions.json`。
+- Repowiki L3 使用外部 Lingxi 根目录中的 `wiki-l3-oracle-sp` skill 生成 FSD，并写入 sql2java 原协议目录 `.workflow-artifacts/<runId>/fsd`。
+- Provider 将 Repowiki L2 facts 映射成 sql2java 的 `analysis-packages/{PKG}/{ref}.json`，让后续 `plan/scaffold/translate` 继续消费原协议。
+
+### 整体架构
+
+```mermaid
+flowchart TD
+  A["/sql2java 命令<br/>.opencode/command/sql2java.md"] --> B["workflow 插件入口<br/>.opencode/plugins/workflow-engine.ts"]
+  B --> C["workflow engine 实现<br/>.opencode/workflow/workflow-engine-impl.ts"]
+  C --> D["inventory/scan<br/>sql2java 原生扫描与分片"]
+  D --> E["analyze dispatch"]
+  E --> F{"REPOWIKI_ANALYZE_PROVIDER=1?"}
+  F -- "no" --> G["原 analyze worker"]
+  F -- "yes" --> H["Repowiki Provider<br/>.opencode/workflow/repowiki-provider.ts"]
+  H --> I["外部 Repowiki runtime<br/>REPOWIKI_ROOT"]
+  I --> J["L1/L2 prepare<br/>plsql-l1 -> list-services -> repowiki-l2 -> merge-knowledge"]
+  J --> K["{sourcePath}/.repowiki/knowledge/functions.json"]
+  H --> L["外部 L3 skill<br/>LINGXICODE_ROOT/config/skills/wiki-l3-oracle-sp"]
+  L --> M["L3 scheduler/dispatcher<br/>LLM worker 生成 FSD"]
+  M --> N[".workflow-artifacts/run-*/fsd/{PKG}/{ref}.md"]
+  K --> O["Provider 写 UnitAnalysisSchema"]
+  O --> P[".workflow-artifacts/run-*/analysis-packages/{PKG}/{ref}.json"]
+  N --> Q["status/analyze.json"]
+  P --> Q
+  Q --> R["workflow advance"]
+  R --> S["plan -> scaffold -> translate -> dedup -> review -> verify"]
+```
+
+### 接入点
+
+| 接入点 | 文件 | 作用 |
+| --- | --- | --- |
+| 命令入口 | `.opencode/command/sql2java.md` | 定义 `/sql2java` 的参数解析、执行循环和 Provider fast path：当 Provider 返回 `nextAction=advance` 时不再派发原 analyze worker，而是直接进入 `advance`。 |
+| 插件入口 | `.opencode/plugins/workflow-engine.ts` | 薄入口，只导出 `WorkflowEnginePlugin`，避免插件加载时误执行 helper。 |
+| Workflow 主实现 | `.opencode/workflow/workflow-engine-impl.ts` | 在 `dispatch` 的 analyze 分片路径里调用 `runRepowikiAnalyzeProviderForDispatch()`。 |
+| Provider | `.opencode/workflow/repowiki-provider.ts` | 适配层。负责定位外部 Repowiki runtime、执行 L1/L2 prepare、执行 L3 scheduler/dispatcher、写回 sql2java artifacts。 |
+| 外部 Repowiki runtime | `REPOWIKI_ROOT` | 指向已有 `config/skills/repowiki` 或独立 Repowiki runtime 目录。 |
+| 外部 Lingxi runtime | `LINGXICODE_ROOT` / `REPOWIKI_L3_RUNNER` | 提供 `wiki-l3-oracle-sp` skill、opencode/lingxicode runner、内置 Node。 |
+
+### 数据流和产物
+
+| 阶段 | 输入 | 输出 | 下游如何使用 |
+| --- | --- | --- | --- |
+| sql2java scan/inventory | PL/SQL 源码目录、可选 `--header/--body/--mainEntry` | `inventory.json`、`packages/*.json`、`subprograms/*.json`、`tables/*.json`、`shardPlan/targetUnits` | 决定 analyze/translate 分片边界，Provider 只处理当前分片的 `targetUnits`。 |
+| Repowiki L1 | 同一份 PL/SQL 源码目录 | `{sourcePath}/.repowiki/plsql-l1.json` 等 L1 事实 | 作为 L2 的事实输入。 |
+| Repowiki L2 | L1 事实、profile `oracle-sp` | `{sourcePath}/.repowiki/knowledge/functions.json` | Provider 按 `PKG.ref` 匹配当前 target unit，生成 `analysis-packages`。 |
+| Repowiki L3 | L2 facts、`wiki-l3-oracle-sp` skill、FSD 模板/规约 | `.workflow-artifacts/<runId>/fsd/{PKG}/{ref}.md` | 后续 `translate` 按原 sql2java 协议读取 FSD。 |
+| Provider publish | L2 facts、L3 FSD、当前分片 `targetUnits` | `analysis-packages/{PKG}/{ref}.json`、`fsd/{PKG}/{ref}.md`、`status/analyze.json` | `workflow advance` 校验 analyze 分片完成；全量 run 会继续进入 `plan/scaffold/translate`。 |
+
+### 新增文件范围
+
+接入实现新增文件应收敛在 `.opencode` 下；仓库根和 `tests` 只保存说明与验证资产。
+
+```text
+sql2java-workflow-repowiki/
+├── .opencode/
+│   ├── command/sql2java.md                  # /sql2java 编排命令，识别 Provider fast path
+│   ├── plugins/workflow-engine.ts           # opencode 插件入口
+│   └── workflow/
+│       ├── workflow-engine-impl.ts          # workflow 状态机与 dispatch 主实现
+│       └── repowiki-provider.ts             # Repowiki 接入适配层
+├── README.md                                # 接入说明、数据流、外部 runtime 配置说明
+└── tests/ts/unit/*repowiki*.test.ts         # Provider/contract/dispatcher 单元测试
+```
+
+不提交：
+
+- `vendor/lingxicode-runtime/**`
+- `vendor/repowiki-runtime/**`
+- `config/opencode*.json` 等本地模型配置
+- `*.exe`
+- `.workflow-artifacts/**`
+- `{sourcePath}/.repowiki/**`
+
+### 外部运行依赖
+
+运行前需要准备一个已有 Lingxi 离线根目录，或从项目组制品库下载等价 runtime。该目录需要包含：
+
+```text
+lingxicode-offline-v1.4.6-win10-x64-skills/
+├── lingxicode.bat
+├── bin/opencode.exe
+├── config/
+│   ├── opencode.json                       # 本地自行配置，不提交到本仓库
+│   ├── bin/codegraph/node.exe
+│   └── skills/
+│       ├── repowiki/
+│       └── wiki-l3-oracle-sp/
+```
+
+下载/准备方式：
+
+| 方式 | 说明 |
+| --- | --- |
+| 行内/项目组离线包 | 使用已发布的 `lingxicode-offline-v1.4.6-win10-x64-skills`，把路径配置到 `LINGXICODE_ROOT`。 |
+| 项目组制品库 | 如果维护 `lingxicode-runtime-win10-x64.zip`，下载后解压到本机任意目录，再配置 `LINGXICODE_ROOT`。 |
+| GitHub Release | 如果仓库 Release 提供 runtime 资产，可在 [Releases](https://github.com/lanszdg/sql2java-workflow-repowiki/releases) 下载；当前源码仓库不内置二进制。 |
+
+模型配置不要提交到本仓库。外部 `LINGXICODE_ROOT/config/opencode.json` 中的 key 建议使用环境变量占位：
+
+```json
+{
+  "provider": {
+    "enterprise-llm": {
+      "options": {
+        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "apiKey": "{env:DASHSCOPE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+### 运行方式
+
+```powershell
+$env:LINGXICODE_ROOT = "D:\path\to\lingxicode-offline-v1.4.6-win10-x64-skills"
+$env:REPOWIKI_ROOT = "$env:LINGXICODE_ROOT\config\skills\repowiki"
+$env:REPOWIKI_NODE_PATH = "$env:LINGXICODE_ROOT\config\bin\codegraph\node.exe"
+$env:REPOWIKI_L3_RUNNER = "$env:LINGXICODE_ROOT\lingxicode.bat"
+
+$env:DASHSCOPE_API_KEY = "<内网/行内模型网关 key>"
+$env:REPOWIKI_ANALYZE_PROVIDER = "1"
+$env:REPOWIKI_AUTO_PREPARE = "1"
+$env:REPOWIKI_PROFILE = "oracle-sp"
+
+& "$env:LINGXICODE_ROOT\lingxicode.bat" --print-logs --log-level WARN run --command sql2java -- resources\mfg_erp_sql_tiny
+```
+
+只验证 `inventory,analyze`：
+
+```powershell
+& "$env:LINGXICODE_ROOT\lingxicode.bat" --print-logs --log-level WARN run --command sql2java -- --phases inventory,analyze resources\mfg_erp_sql_tiny
+```
+
+注意：`--phases inventory,analyze` 是局部 smoke，只证明前两阶段。完整端到端必须不加 `--phases`，或显式覆盖 `plan,scaffold,translate,dedup,review,verify` 的后续验证。
+
+### Repowiki 运行时文件职责
+
+这些文件来自外部 `REPOWIKI_ROOT`，本仓库只通过 Provider 调用它们：
+
+| 文件/目录 | 作用 | 本接入链路是否使用 |
+| --- | --- | --- |
+| `lib/plsql-l1-producer.cjs` | L1 入口，扫描 Oracle PL/SQL 源码并生成 `.repowiki/plsql-l1.json` 等源码事实。 | 是，Provider prepare 第一步。 |
+| `list-services.cjs` | 基于 L1/profile 生成候选清单和 L2 前置输入。 | 是，Provider prepare 第二步。 |
+| `repowiki-l2.cjs` | L2 主入口，将 L1 事实转换为面向 FSD 的函数事实。 | 是，Provider prepare 第三步。 |
+| `merge-knowledge.cjs` | 合并 L2 分片产物，生成 `.repowiki/knowledge/functions.json`。 | 是，Provider prepare 第四步。 |
+| `repowiki-l3-scheduler.cjs` | 根据 L2 facts 和 `wiki-l3-oracle-sp` skill contract 生成 L3 function-doc 任务池。 | 是，Provider L3 第一步。 |
+| `repowiki-l3-dispatcher.cjs` | 滚动派发 L3 worker，通过 `REPOWIKI_L3_RUNNER` 执行业务 skill。 | 是，Provider L3 第二步。 |
+| `repowiki-l3-task.cjs` | L3 worker 的 claim/done/fail 控制脚本。 | 是，由 L3 worker 间接调用。 |
+| `profiles/oracle-sp.json` | Oracle 存储过程 profile，约束 L2 事实类型和业务目标。 | 是，默认 `REPOWIKI_PROFILE=oracle-sp`。 |
+| `lib/l3-skill-contract.cjs` | 读取 L3 skill manifest、模板、输出根和校验配置。 | 是，L3 scheduler/worker 使用。 |
+| `lib/l3-graph-slice.cjs` | 为 L3 worker 准备局部事实切片。 | 是，L3 worker 使用。 |
+| `lib/fsd-facts-*.cjs` | FSD facts 编译、coverage、gate、token、renderer 辅助。 | L3/gate/eval 使用；Provider 不走 renderer 直出替代 L3。 |
+| `eval/`、`tests/` | source facts、FSD coverage、mutation、golden 测试资产。 | 验收和回归使用。 |
+
+`wiki-l3-oracle-sp` skill 来自外部 `LINGXICODE_ROOT/config/skills/wiki-l3-oracle-sp`：
+
+| 文件/目录 | 作用 |
+| --- | --- |
+| `SKILL.md` | Oracle 存过 FSD L3 worker 的业务规约。 |
+| `manifest.json` | L3 skill manifest，声明 kind、输出根环境变量 `REPOWIKI_L3_DOCS_ROOT` 等契约。 |
+| `validation.json` | L3 文档基础校验配置。 |
+| `selection-policy.json` | L3 任务选择策略。 |
+| `rules/` | 行内 Oracle 存过 FSD 规则材料。 |
+| `templates/功能文档.md` | L3 生成 FSD 的业务模板。 |
+
+### Repowiki 运行时状态文件
+
+| 产物 | 位置 | 说明 |
+| --- | --- | --- |
+| L1/L2 源码事实 | `{sourcePath}/.repowiki/` | Repowiki prepare 写在被分析项目目录下，供 L2/L3 复用。 |
+| L2 汇总 facts | `{sourcePath}/.repowiki/knowledge/functions.json` | Provider 按 `PKG.ref` 匹配当前 sql2java target unit。 |
+| L3 任务池 | `{sourcePath}/.repowiki/l3-*` | scheduler/dispatcher 的任务、状态和 worker 过程文件。 |
+| FSD 文档 | `.workflow-artifacts/<runId>/fsd/{PKG}/{ref}.md` | Provider 注入 `REPOWIKI_L3_DOCS_ROOT=<artifactsDir>` 后，L3 文档写入 sql2java artifact 目录。 |
+| analyze 状态 | `.workflow-artifacts/<runId>/status/analyze.json` | Provider 收口 analyze，使 workflow 可以继续 advance 到后续阶段。 |
+
 基于 AI Agent 的 Oracle PL/SQL → Spring Boot + MyBatis 端到端转译系统。采用确定性状态机驱动的单流水线工作流，以严格 1:1 忠实转换为原则，将 PL/SQL 代码翻译为可编译的 Java 应用。
 
 ## 架构概览

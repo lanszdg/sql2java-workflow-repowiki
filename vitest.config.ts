@@ -8,6 +8,15 @@ export default defineConfig({
     globals: true,
     testTimeout: 30_000,
     include: ["tests/ts/**/*.test.ts"],
+    exclude: [
+      "**/node_modules/**",
+      "**/vendor/**",
+      "**/e2e-baselines/**",
+      "**/.codex-archive/**",
+      "**/.workflow-artifacts/**",
+      "**/.codex-e2e/**",
+      "**/.codex-debug/**",
+    ],
     // zod v4 的 ESM index.js 使用 `import * as z; export { z }` 模式，
     // esbuild 预打包时无法正确处理 namespace re-export，导致 `z` 为 undefined。
     // 解决方案：将 zod 标记为 inline 依赖，阻止 esbuild 预打包，

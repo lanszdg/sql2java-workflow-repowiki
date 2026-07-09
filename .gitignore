@@ -3,6 +3,11 @@ dist/
 /generated/
 .workflow-artifacts/
 bun.lock
+lingxicode.bat
+
+# External runtimes are not committed. Point README environment variables to a
+# local Lingxi/Repowiki runtime, or download runtime assets separately.
+vendor/
 
 # L2 执行点测试的临时 workDir（含真实 agent run 产物）
 tests/llm/.workspace/
