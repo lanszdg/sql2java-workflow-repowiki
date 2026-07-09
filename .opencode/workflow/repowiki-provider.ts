@@ -224,7 +224,7 @@ function resolveRepowikiRuntimeRoot(
     repowikiRoot,
     env.REPOWIKI_ROOT,
     env.LINGXICODE_ROOT,
-    join(pluginRoot, "vendor", "repowiki-runtime"),
+    join(pluginRoot, ".opencode", "vendor", "repowiki-runtime"),
   ].filter((x): x is string => Boolean(x && x.trim()))
 
   for (const root of roots) {
@@ -234,7 +234,7 @@ function resolveRepowikiRuntimeRoot(
     if (prepareScripts.every((file) => existsSync(file))) return resolved
   }
 
-  throw new Error("Repowiki runtime unavailable. Expected bundled vendor/repowiki-runtime, or set repowikiRoot/REPOWIKI_ROOT/LINGXICODE_ROOT.")
+  throw new Error("Repowiki runtime unavailable. Expected bundled .opencode/vendor/repowiki-runtime, or set repowikiRoot/REPOWIKI_ROOT/LINGXICODE_ROOT.")
 }
 
 function repowikiRuntimeScripts(root: string) {
