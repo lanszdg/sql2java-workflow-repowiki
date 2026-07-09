@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@griffithswaite/ts-plsql-parser": "^1.0.5"
+  }
+}

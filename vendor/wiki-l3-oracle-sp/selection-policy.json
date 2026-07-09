@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "default_bucket": "in_scope",
+  "service_rules": [],
+  "function_rules": [
+    {
+      "when": { "method_regex": "(?i)^log_" },
+      "bucket": "in_scope",
+      "reason": "oracle_sp_log_helper"
+    },
+    {
+      "when": { "source_file_regex": "\\.(pks|pkb|sql)$" },
+      "bucket": "in_scope",
+      "reason": "oracle_sp_plsql_source"
+    }
+  ]
+}

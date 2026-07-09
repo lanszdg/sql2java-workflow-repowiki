@@ -1,0 +1,14 @@
+{
+  "name": "oracle-sp",
+  "model": "package",
+  "entry_type": "procedure",
+  "_说明": "Oracle PL/SQL: 服务=Package, 功能=Procedure/Function, 下游=跨包调用+表操作+序列/常量引用。L1 codegraph 不支持 PL/SQL，L2 用正则从 .pks/.pkb 文本抽取。",
+  "service_patterns": ["CREATE OR REPLACE PACKAGE"],
+  "entry_patterns": ["PROCEDURE ", "FUNCTION "],
+  "file_extensions": [".pks", ".pkb", ".sql"],
+  "downstream_depth": 2,
+  "terminology": {
+    "功能类型": "存过-PL/SQL",
+    "服务列": "所属包(Package)"
+  }
+}

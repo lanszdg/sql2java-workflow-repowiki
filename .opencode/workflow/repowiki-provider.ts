@@ -224,6 +224,7 @@ function resolveRepowikiRuntimeRoot(
     repowikiRoot,
     env.REPOWIKI_ROOT,
     env.LINGXICODE_ROOT,
+    join(pluginRoot, "vendor", "repowiki-runtime"),
   ].filter((x): x is string => Boolean(x && x.trim()))
 
   for (const root of roots) {
@@ -233,7 +234,7 @@ function resolveRepowikiRuntimeRoot(
     if (prepareScripts.every((file) => existsSync(file))) return resolved
   }
 
-  throw new Error("Repowiki runtime unavailable. Set repowikiRoot/REPOWIKI_ROOT/LINGXICODE_ROOT to the Lingxi root that contains config/skills/repowiki.")
+  throw new Error("Repowiki runtime unavailable. Expected bundled vendor/repowiki-runtime, or set repowikiRoot/REPOWIKI_ROOT/LINGXICODE_ROOT.")
 }
 
 function repowikiRuntimeScripts(root: string) {
@@ -376,6 +377,50 @@ function toSubprogram(fact: Record<string, unknown>, target: TargetUnit) {
 
 function writeJson(file: string, value: unknown): void {
   safeWriteFile(file, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+function cleanPathPart(value: unknown): string {
+  return String(value || "").trim()
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function fsdCandidateRels(target: TargetUnit, fact: Record<string, unknown>, desiredRel: string): string[] {
+  const factPkg = factPackage(fact)
+  const method = cleanPathPart(fact.method || fact.refName)
+  const dirs = unique([
+    target.pkg,
+    factPkg,
+    cleanPathPart(fact.package_name),
+    cleanPathPart(fact.impl_qn),
+  ])
+  const names = unique([
+    target.ref,
+    target.ref.toLowerCase(),
+    method,
+    method.toLowerCase(),
+  ])
+
+  return unique([
+    desiredRel,
+    ...dirs.flatMap((dir) => names.map((name) => normalizeSlash(join("fsd", dir, `${name}.md`)))),
+  ])
+}
+
+function publishFsdDoc(artifactsDir: string, target: TargetUnit, fact: Record<string, unknown>, desiredRel: string): void {
+  const desiredFile = join(artifactsDir, desiredRel)
+  if (existsSync(desiredFile)) return
+
+  for (const rel of fsdCandidateRels(target, fact, desiredRel)) {
+    const file = join(artifactsDir, rel)
+    if (!existsSync(file)) continue
+    safeWriteFile(desiredFile, readFileSync(file, "utf-8"))
+    return
+  }
+
+  throw new Error(`Repowiki L3 FSD output not found for ${target.unitId}; expected ${desiredRel}`)
 }
 
 function repowikiPrepareStatusFile(artifactsDir: string): string {
@@ -865,6 +910,7 @@ export function runRepowikiAnalyzeProvider(options: RepowikiAnalyzeProviderOptio
       const parsedUnit = UnitAnalysisSchema.parse(unit)
 
       writeJson(join(options.artifactsDir, unitRel), parsedUnit)
+      publishFsdDoc(options.artifactsDir, target, fact, fsdRel)
       writtenArtifacts.push(unitRel, fsdRel)
     }
 

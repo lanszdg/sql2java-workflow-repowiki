@@ -1,0 +1,180 @@
+{
+  "_comment": "Oracle 存过 FSD skill 语义校验口径。功能类型固定为存过-PL/SQL，服务=Package，功能=Procedure/Function。",
+  "localeRequire": "zh",
+  "serviceRequiredFields": [
+    "service_name",
+    "service_category",
+    "impl_qn",
+    "iface_qn",
+    "config",
+    "version"
+  ],
+  "functionRequiredFields": [
+    "business_name",
+    "function_type",
+    "function_name",
+    "summary",
+    "entry",
+    "impl_qn",
+    "method",
+    "module"
+  ],
+  "rejectRawIdentifierResidue": true,
+  "rawIdentifierFields": [
+    "function_name"
+  ],
+  "rawIdentifierRejectPattern": "_|[a-z][A-Z]|[A-Z][a-z]+[A-Z]|(Service|Impl|Controller|Facade|Manager|Provider|Consumer|Mapper|Repository|Client|Api|DTO|DO|VO|BO|PKG|PROCEDURE|FUNCTION)$|^[a-z]{3,}$",
+  "softCheckTypes": [
+    "raw_identifier",
+    "weak_name",
+    "summary_short",
+    "locale_zh",
+    "summary_name_consistency"
+  ],
+  "minSummaryChars": 12,
+  "emptySummaryValues": [
+    "待补充",
+    "需人工复核",
+    "无"
+  ],
+  "hardRejectPatternsByField": {
+    "service_category": [
+      "(^|[\\\\/])(未分类|需业务复核|需人工复核|待补充|无)([\\\\/]|$)"
+    ],
+    "business_name": [
+      "(^|[\\\\/])(未分类|需业务复核|需人工复核|待补充|无)([\\\\/]|$)"
+    ],
+    "function_type": [
+      "^(?!存过-PL/SQL$).*$"
+    ]
+  },
+  "functionTypeByEntryType": {
+    "procedure": "存过-PL/SQL",
+    "*": "存过-PL/SQL"
+  },
+  "rejectSummaryPatterns": [
+    "^(待补充|需人工复核|无)$",
+    "^(调用|执行).{0,6}$"
+  ],
+  "requireServiceRowReference": true,
+  "uniqueFunctionDocName": true,
+  "functionDocSections": [
+    "概览",
+    "表结构映射",
+    "依赖分析",
+    "业务规则",
+    "控制流与异常",
+    "特殊语法转化规约"
+  ],
+  "functionDocSubsections": {
+    "概览": [
+      "存储过程功能",
+      "参数清单与 Java 类型映射",
+      "转换策略",
+      "签名",
+      "输入类型定义"
+    ],
+    "表结构映射": [
+      "涉及的表清单",
+      "列 → DO 字段映射",
+      "跨表关系",
+      "特殊列处理"
+    ],
+    "依赖分析": [
+      "调用的其他子程序",
+      "被其他子程序调用",
+      "跨包调用 → Service 注入",
+      "序列依赖",
+      "常量依赖"
+    ],
+    "业务规则": [
+      "校验规则",
+      "计算逻辑",
+      "状态流转",
+      "边界条件"
+    ],
+    "控制流与异常": [
+      "流程图",
+      "分支逻辑",
+      "循环结构",
+      "异常处理"
+    ],
+    "特殊语法转化规约": [
+      "转化映射",
+      "事务边界",
+      "需手动审查的构造"
+    ]
+  },
+  "functionDocFieldNames": {
+    "overview": "概览",
+    "tableMapping": "表结构映射",
+    "dependencies": "依赖分析",
+    "businessRules": "业务规则",
+    "controlFlow": "控制流与异常",
+    "specialSyntax": "特殊语法转化规约"
+  },
+  "emptyDocSectionValues": [
+    "无"
+  ],
+  "rejectFunctionTypeValues": [
+    "rpc",
+    "http",
+    "controller",
+    "dubbo",
+    "spring-rest",
+    "联机-DSF服务",
+    "HTTP接口"
+  ],
+  "allowedAcronymsByField": {
+    "business_name": [],
+    "function_type": [
+      "PL",
+      "SQL"
+    ],
+    "function_name": [],
+    "summary": [
+      "FSD",
+      "PL",
+      "SQL"
+    ],
+    "service_name": [],
+    "service_category": []
+  },
+  "technicalSlugPatterns": [
+    "[a-z]+(?:-[a-z0-9]+){1,}"
+  ],
+  "functionNameRejectPatterns": [
+    "[#_]",
+    "--?\\d+$",
+    "PROCEDURE$",
+    "FUNCTION$"
+  ],
+  "businessNameRejectPatterns": [
+    "[#_]",
+    "[a-z]+(?:-[a-z0-9]+){1,}"
+  ],
+  "serviceNameRejectPatterns": [
+    "[#_]",
+    "[a-z]+(?:-[a-z0-9]+){1,}",
+    "PKG$"
+  ],
+  "weakFunctionNameValues": [
+    "请求",
+    "调用",
+    "执行",
+    "获取",
+    "查询",
+    "处理",
+    "操作"
+  ],
+  "summaryRejectPatterns": [
+    "^(待补充|需人工复核|无)$",
+    "业务操作$",
+    "^(调用|执行).{0,20}(方法|接口|存过|过程)$"
+  ],
+  "summaryRequireFunctionNameCore": true,
+  "maxValidationErrors": 20,
+  "maxAttempts": 2,
+  "simpleFunctionMermaidOptional": true,
+  "requireSubsections": true
+}
