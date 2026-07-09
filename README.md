@@ -119,7 +119,7 @@ sql2java-workflow-repowiki/
 | `vendor/repowiki-runtime/repowiki-l2.cjs` | L2 主入口 | 生成 `.repowiki/knowledge/parts` 中的函数事实 |
 | `vendor/repowiki-runtime/merge-knowledge.cjs` | L2 合并入口 | 合并 parts，生成 `.repowiki/knowledge/functions.json` |
 | `vendor/repowiki-runtime/repowiki-l3-scheduler.cjs` | L3 调度入口 | 基于 L2 facts 和 oracle-sp 规约生成 L3 任务池 |
-| `vendor/repowiki-runtime/repowiki-l3-dispatcher.cjs` | L3 并发派发 | 调用 Lingxi/opencode worker 并发生成 FSD 文档 |
+| `vendor/repowiki-runtime/repowiki-l3-dispatcher.cjs` | L3 并发派发 | 调用 Lingxi/opencode worker 并发生成 FSD 文档；在 L3 `ALL_DONE` 后清理残留 worker，避免 analyze 等待子进程而不收口 |
 | `vendor/repowiki-runtime/repowiki-l3-task.cjs` | L3 任务控制 | claim/done/repair、FSD 输出路径、facts context 等任务控制 |
 | `vendor/repowiki-runtime/repowiki-progress.cjs` | L3 进度读取 | dispatcher 读取和输出任务进度 |
 | `vendor/repowiki-runtime/l3-worker-prompt.md` | L3 worker 提示词 | 约束 worker 按任务上下文、FSD facts 和 skill 规约生成文档 |

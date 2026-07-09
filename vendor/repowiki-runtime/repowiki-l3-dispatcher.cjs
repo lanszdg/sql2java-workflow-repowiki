@@ -270,13 +270,49 @@ function spawnWorker(options, seq) {
   child.stdout.on("data", (buf) => writeWorkerChunk(info, "stdout", buf, options.verboseWorkerOutput));
   child.stderr.on("data", (buf) => writeWorkerChunk(info, "stderr", buf, options.verboseWorkerOutput));
   child.on("exit", (code, signal) => {
-    logStream.write(`[dispatcher] agent=${agentName} exit code=${code === null ? "" : code} signal=${signal || ""} finished=${new Date().toISOString()}\n`);
-    logStream.end();
+    closeWorkerLog(info, `[dispatcher] agent=${agentName} exit code=${code === null ? "" : code} signal=${signal || ""} finished=${new Date().toISOString()}\n`);
   });
   if (options.verboseWorkerOutput) {
     console.log(`[L3-dispatcher] worker-start agent=${agentName} log=${logFile}`);
   }
   return info;
+}
+
+function closeWorkerLog(info, line = "") {
+  if (!info || info.logClosed || !info.logStream) return;
+  if (line) info.logStream.write(line);
+  info.logStream.end();
+  info.logClosed = true;
+}
+
+function killProcessTree(child) {
+  if (!child || !child.pid) return;
+  if (process.platform === "win32") {
+    childProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  } else if (!child.killed) {
+    child.kill("SIGTERM");
+  }
+}
+
+function stopActiveWorkers(active, reason = "dispatcher_stop", killFn = killProcessTree) {
+  if (!active || active.size === 0) return 0;
+  let stopped = 0;
+  for (const [, info] of active) {
+    if (!info || info.exited) continue;
+    closeWorkerLog(info, `[dispatcher] agent=${info.agentName || ""} stop reason=${reason} finished=${new Date().toISOString()}\n`);
+    try {
+      killFn(info.child);
+    } catch (_) {
+      // A failed cleanup must not keep the dispatcher alive after all tasks are done.
+    }
+    try { if (info.child && info.child.stdout) info.child.stdout.destroy(); } catch (_) {}
+    try { if (info.child && info.child.stderr) info.child.stderr.destroy(); } catch (_) {}
+    try { if (info.child && info.child.unref) info.child.unref(); } catch (_) {}
+    info.exited = true;
+    stopped++;
+  }
+  active.clear();
+  return stopped;
 }
 
 function windowsQuote(value) {
@@ -365,7 +401,11 @@ async function main() {
       console.log(`[L3-dispatcher] action=${decision.action} spawn=${decision.spawnNow || 0} requested=${decision.spawn || 0} active=${active.size} reflected=${decision.reflectedActive || 0} fresh=${decision.freshActive || 0} externalRunning=${decision.externalRunning || 0} reason=${decision.reason}`);
     }
 
-    if (decision.action === "done") return;
+    if (decision.action === "done") {
+      const stopped = stopActiveWorkers(active, decision.reason);
+      if (stopped) console.log(`[L3-dispatcher] stopped-active-workers count=${stopped} reason=${decision.reason}`);
+      return;
+    }
     if (decision.action === "failed") throw new Error("L3 has failed tasks and no runnable work; inspect scheduler diagnostics");
     if (decision.action === "spawn") {
       for (let i = 0; i < decision.spawnNow; i++) {
@@ -442,5 +482,6 @@ module.exports = {
   runnerEnv,
   safeLogName,
   statusLines,
+  stopActiveWorkers,
   validateOpencodeConfig,
 };
