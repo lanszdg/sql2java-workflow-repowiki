@@ -179,6 +179,7 @@ describe("Repowiki analyze provider", () => {
         l3Runner: (command) => {
           commands.push(command.name)
           expect(command.env?.REPOWIKI_L3_DOCS_ROOT).toBe(t.dir)
+          expect(command.env?.REPOWIKI_WORKFLOW_ARTIFACTS_DIR).toBe(t.dir)
           if (command.name === "l3-dispatcher") {
             expect(command.args).toEqual(expect.arrayContaining(["--runner", sql2javaRunner]))
           }

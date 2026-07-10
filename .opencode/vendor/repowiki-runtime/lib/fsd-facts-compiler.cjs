@@ -30,6 +30,26 @@ function cleanName(value) {
   return String(value || "").trim();
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
+function workflowScanOf(context) {
+  return isObject(context && context.workflowScan) ? context.workflowScan : {};
+}
+
+function scanSubprogramOf(context) {
+  const scan = workflowScanOf(context);
+  return isObject(scan.subprogram) ? scan.subprogram : {};
+}
+
+function upperKey(value) {
+  return cleanName(value).toUpperCase();
+}
+
 function pascalCaseName(value) {
   return cleanName(value)
     .split(/[^A-Za-z0-9]+/)
@@ -82,13 +102,15 @@ function columnMappingOf(tableName, col) {
   const name = columnNameOf(col);
   if (!name) return null;
   const row = typeof col === "string" ? {} : (col || {});
+  const nullable = firstPresent(row.nullable, row.is_nullable, row.isNullable);
+  const primaryKey = firstPresent(row.primary_key, row.primaryKey, row.pk, row.is_primary_key, row.isPrimaryKey);
   return {
     name,
     oracleType: cleanName(row.oracle_type || row.oracleType || row.type),
     javaType: cleanName(row.java_type || row.javaType),
     javaFieldName: cleanName(row.java_field_name || row.javaFieldName) || camelCaseName(name),
-    nullable: cleanName(row.nullable || row.is_nullable || row.isNullable) || "UNKNOWN",
-    primaryKey: cleanName(row.primary_key || row.primaryKey || row.pk || row.is_primary_key || row.isPrimaryKey) || "",
+    nullable: nullable === "" ? "UNKNOWN" : nullable,
+    primaryKey: primaryKey === "" ? "" : primaryKey,
     usedByCurrentSp: row.used_by_current_sp !== undefined ? Boolean(row.used_by_current_sp)
       : row.usedByCurrentSp !== undefined ? Boolean(row.usedByCurrentSp)
         : "UNKNOWN",
@@ -120,33 +142,95 @@ function compileIdentity(l2Fact) {
   };
 }
 
-function compileSignature(l2Fact) {
+function paramFromL2(param) {
+  return {
+    name: cleanName(param.name),
+    direction: cleanName(param.direction || param.mode || "IN").toUpperCase(),
+    oracleType: cleanName(param.oracle_type || param.oracleType || param.type),
+    javaType: cleanName(param.java_type || param.javaType),
+  };
+}
+
+function paramFromScan(param, l2Param = {}) {
+  return {
+    name: cleanName(param.name || l2Param.name),
+    direction: cleanName(param.direction || param.mode || l2Param.direction || "IN").toUpperCase(),
+    oracleType: cleanName(param.oracle_type || param.oracleType || param.type || l2Param.oracleType),
+    javaType: cleanName(l2Param.javaType || param.java_type || param.javaType),
+  };
+}
+
+function compileSignature(l2Fact, context = {}) {
+  const scanSubprogram = scanSubprogramOf(context);
+  const l2Params = asArray(l2Fact.oracle_params || l2Fact.params).map(paramFromL2);
+  const l2ByName = new Map(l2Params.map((param) => [upperKey(param.name), param]));
+  const scanParams = asArray(scanSubprogram.parameters).map((param) => paramFromScan(param, l2ByName.get(upperKey(param && param.name))));
+  const params = scanParams.length
+    ? [
+      ...scanParams,
+      ...l2Params.filter((param) => !scanParams.some((scanParam) => upperKey(scanParam.name) === upperKey(param.name))),
+    ]
+    : l2Params;
+  const returnType = firstPresent(scanSubprogram.returnType, l2Fact.return_type);
+  const returnJavaType = firstPresent(l2Fact.return_java_type, l2Fact.response_type);
   return {
     raw: cleanName(l2Fact.signature),
-    params: asArray(l2Fact.oracle_params || l2Fact.params).map((param) => ({
-      name: cleanName(param.name),
-      direction: cleanName(param.direction || param.mode || "IN").toUpperCase(),
-      oracleType: cleanName(param.oracle_type || param.oracleType || param.type),
-      javaType: cleanName(param.java_type || param.javaType),
-    })),
-    return: l2Fact.return_type ? {
-      oracleType: cleanName(l2Fact.return_type),
-      javaType: cleanName(l2Fact.return_java_type || l2Fact.response_type),
+    params,
+    return: returnType ? {
+      oracleType: cleanName(returnType),
+      javaType: cleanName(returnJavaType),
     } : null,
   };
 }
 
-function compileTableMappings(l2Fact) {
-  return asArray(l2Fact.table_facts).filter((row) => !isNoiseName(row.table || row.tableName)).map((row, index) => ({
-    tableName: cleanName(row.table || row.tableName),
-    operations: [cleanName(row.operation || row.op || row.action || "UNKNOWN").toUpperCase()].filter(Boolean),
-    columns: asArray(row.columns).map((col) => typeof col === "string" ? col : cleanName(col.name || col.column || col.columnName)).filter(Boolean),
-    sourceTrace: traceOf(row, `table_facts[${index}]`),
-  }));
+function scanTableByName(context) {
+  const scan = workflowScanOf(context);
+  const map = new Map();
+  for (const table of asArray(scan.tables)) {
+    const name = upperKey(table && table.name);
+    if (name) map.set(name, table);
+  }
+  return map;
+}
+
+function scanColumnMapping(tableName, col, usedColumns, table) {
+  const name = cleanName(col && col.name);
+  if (!name) return null;
+  const pkSet = new Set(asArray(table && table.primaryKey).map(upperKey));
+  const usedKnown = usedColumns.size > 0;
+  return columnMappingOf(tableName, {
+    name,
+    oracleType: col.oracleType || col.type,
+    nullable: col.nullable,
+    primaryKey: col.isPrimaryKey !== undefined ? col.isPrimaryKey : pkSet.has(upperKey(name)),
+    usedByCurrentSp: usedKnown ? usedColumns.has(upperKey(name)) : "UNKNOWN",
+    sourceTrace: [`workflowScan.tables.${tableName}.${name}`],
+  });
+}
+
+function compileTableMappings(l2Fact, context = {}) {
+  const scanTables = scanTableByName(context);
+  return asArray(l2Fact.table_facts).filter((row) => !isNoiseName(row.table || row.tableName)).map((row, index) => {
+    const tableName = cleanName(row.table || row.tableName);
+    const scanTable = scanTables.get(upperKey(tableName));
+    const l2Columns = asArray(row.columns)
+      .map((col) => typeof col === "string" ? col : cleanName(col.name || col.column || col.columnName))
+      .filter(Boolean);
+    const usedColumns = new Set(l2Columns.map(upperKey));
+    const columns = scanTable && asArray(scanTable.columns).length
+      ? asArray(scanTable.columns).map((col) => scanColumnMapping(tableName, col, usedColumns, scanTable)).filter(Boolean)
+      : l2Columns;
+    return {
+      tableName,
+      operations: [cleanName(row.operation || row.op || row.action || "UNKNOWN").toUpperCase()].filter(Boolean),
+      columns,
+      sourceTrace: scanTable ? [`workflowScan.tables.${tableName}`] : traceOf(row, `table_facts[${index}]`),
+    };
+  });
 }
 
 function compileDependencies(l2Fact, context = {}) {
-  const calls = asArray(l2Fact.cross_package_calls)
+  const l2Calls = asArray(l2Fact.cross_package_calls)
     .filter((row) => !isNoiseName(row.target_package || row.packageName))
     .map((row, index) => ({
       target: dotName(row.target_package || row.packageName, row.target_member || row.member || row.method),
@@ -155,6 +239,21 @@ function compileDependencies(l2Fact, context = {}) {
       sourceTrace: traceOf(row, `cross_package_calls[${index}]`),
     }))
     .filter((row) => row.target);
+  const scanSubprogram = scanSubprogramOf(context);
+  const scanCalls = asArray(scanSubprogram.directCalls)
+    .filter((row) => !isNoiseName(row.package))
+    .map((row, index) => ({
+      target: dotName(row.package, row.name),
+      targetPackage: cleanName(row.package),
+      targetMember: cleanName(row.name),
+      sourceTrace: [`workflowScan.subprogram.directCalls[${index}]`],
+    }))
+    .filter((row) => row.target);
+  const callsByTarget = new Map();
+  for (const row of [...l2Calls, ...scanCalls]) {
+    if (!callsByTarget.has(row.target)) callsByTarget.set(row.target, row);
+  }
+  const calls = [...callsByTarget.values()];
 
   const sequences = asArray(l2Fact.sequence_deps).map((row, index) => ({
     name: cleanName(row.sequence || row.name),
@@ -256,7 +355,19 @@ function compileManualReview(specialSyntax) {
     }));
 }
 
-function compileSourceTrace(l2Fact) {
+function compileSourceTrace(l2Fact, context = {}) {
+  const scanSubprogram = scanSubprogramOf(context);
+  const location = isObject(scanSubprogram.bodyLocation) ? scanSubprogram.bodyLocation
+    : isObject(scanSubprogram.headerLocation) ? scanSubprogram.headerLocation
+      : null;
+  if (location && Array.isArray(location.lineRange)) {
+    return [{
+      file: cleanName(location.absolutePath || location.file || l2Fact.source_file || l2Fact.sourceFile || l2Fact.file || "<workflow-scan>"),
+      startLine: Number(location.lineRange[0] || 1),
+      endLine: Number(location.lineRange[1] || location.lineRange[0] || 1),
+      fact: "subprogram",
+    }];
+  }
   return [{
     file: cleanName(l2Fact.source_file || l2Fact.sourceFile || l2Fact.file || "<l2-facts>"),
     startLine: Number(l2Fact.start_line || l2Fact.startLine || 1),
@@ -269,7 +380,8 @@ function compileTemplateDepth(l2Fact, identity, signature, tableMappings, depend
   const rawTables = asArray(l2Fact.table_facts);
   const tableDepth = tableMappings.map((table) => {
     const raw = rawTables.find((row) => cleanName(row.table || row.tableName) === table.tableName) || {};
-    const columns = asArray(raw.columns)
+    const baseColumns = asArray(table.columns).length ? asArray(table.columns) : asArray(raw.columns);
+    const columns = baseColumns
       .map((col) => columnMappingOf(table.tableName, col))
       .filter(Boolean);
     return {
@@ -335,14 +447,14 @@ function compileTemplateDepth(l2Fact, identity, signature, tableMappings, depend
 function compileFsdFacts(l2Fact, context = {}) {
   if (!isObject(l2Fact)) throw new Error("compileFsdFacts requires an L2 Oracle fact object");
   const identity = compileIdentity(l2Fact);
-  const signature = compileSignature(l2Fact);
-  const tableMappings = compileTableMappings(l2Fact);
+  const signature = compileSignature(l2Fact, context);
+  const tableMappings = compileTableMappings(l2Fact, context);
   const dependencies = compileDependencies(l2Fact, context);
   const controlFlow = compileControlFlow(l2Fact);
   const exceptions = compileExceptions(l2Fact);
   const specialSyntax = compileSpecialSyntax(l2Fact);
   const manualReview = compileManualReview(specialSyntax);
-  const sourceTrace = compileSourceTrace(l2Fact);
+  const sourceTrace = compileSourceTrace(l2Fact, context);
   const transactions = compileTransactions(l2Fact, specialSyntax);
   const fact = {
     schemaVersion: FSD_FACTS_SCHEMA_VERSION,

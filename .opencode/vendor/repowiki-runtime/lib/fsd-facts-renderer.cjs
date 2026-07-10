@@ -57,6 +57,13 @@ function tableColumnName(col) {
   return typeof col === "string" ? col : (col && (col.name || col.column || col.columnName));
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
 function renderReturn(signature) {
   const ret = signature && signature.return;
   if (!ret || !ret.oracleType) return "- Return: None";
@@ -133,9 +140,9 @@ function renderFsdMarkdown(facts) {
           col.oracleType || col.oracle_type || "",
           col.javaType || col.java_type || "UNKNOWN",
           col.javaFieldName || col.java_field_name || "",
-          col.nullable || "UNKNOWN",
-          col.primaryKey || col.primary_key || "",
-          col.usedByCurrentSp,
+          firstPresent(col.nullable, col.is_nullable, col.isNullable, "UNKNOWN"),
+          firstPresent(col.primaryKey, col.primary_key, col.pk, col.is_primary_key, col.isPrimaryKey),
+          firstPresent(col.usedByCurrentSp, col.used_by_current_sp, "UNKNOWN"),
         ];
       }));
     }

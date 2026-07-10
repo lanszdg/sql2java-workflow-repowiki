@@ -12,6 +12,7 @@ const { renderFsdMarkdown } = require(path.join(__dirname, "lib", "fsd-facts-ren
 const { validateFsdFacts } = require(path.join(__dirname, "lib", "fsd-facts-schema.cjs"));
 const { computeFsdCoverage, detectFsdPollution } = require(path.join(__dirname, "lib", "fsd-facts-coverage.cjs"));
 const { loadSourceFactRepairs, applySourceFactRepairsToFunction } = require(path.join(__dirname, "lib", "source-facts-repairs.cjs"));
+const { loadWorkflowScanContextForFact } = require(path.join(__dirname, "lib", "workflow-scan-context.cjs"));
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -1639,7 +1640,11 @@ function compiledFsdFactsForTask(task) {
     ? (functions.find((row) => sameFunction(row, { ...info, module: info.module || task.module || "" })) || info)
     : info;
   const repairs = loadSourceFactRepairs(sourceFactRepairsFile);
-  return compileFsdFacts(applySourceFactRepairsToFunction(fn, repairs));
+  const repaired = applySourceFactRepairsToFunction(fn, repairs);
+  const workflowScan = loadWorkflowScanContextForFact(repaired, {
+    artifactsDir: process.env.REPOWIKI_WORKFLOW_ARTIFACTS_DIR || "",
+  });
+  return compileFsdFacts(repaired, workflowScan ? { workflowScan } : {});
 }
 
 function fsdContextForTask(task) {
